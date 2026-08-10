@@ -1,0 +1,18 @@
+# Copy this file to config.yaml (gitignored) and fill in the values below.
+
+base_url: "http://localhost:3000"
+
+# Numeric PrairieLearn course_instance id, e.g. from the URL
+# http://localhost:3000/pl/course_instance/<this number>/instructor/...
+course_instance_id: null
+
+# Numeric PrairieLearn assessment id, e.g. from the URL
+# http://localhost:3000/pl/course_instance/.../instructor/assessment/<this number>/...
+assessment_id: null
+
+# Number of distinct instances to generate when running the fetch script.
+n_instances: 3
+
+# Directory (relative to the repo root, unless absolute) where fetched
+# blank/key HTML is saved, one subfolder per assessment_instance_id.
+output_dir: "output"

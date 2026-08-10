@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# real config with local server/course/assessment IDs - keep config.example.yaml checked in instead
+config.yaml
+
+# raw HTML fetched from the local PL server during Phase 1 development
+output/

@@ -1,0 +1,27 @@
+[project]
+name = "pl2docx"
+version = "0.1.0"
+description = "Generate paper-based (Word) versions of PrairieLearn assessments"
+readme = "README.md"
+license = "MIT"
+authors = [
+    { name = "Jennifer Laaser", email = "j.laaser@pitt.edu" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "beautifulsoup4>=4.15.0",
+    "pyyaml>=6.0.3",
+    "requests>=2.34.2",
+]
+
+[project.scripts]
+pl2docx-fetch = "pl2docx.fetch:main"
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]

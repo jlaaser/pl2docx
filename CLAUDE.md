@@ -46,8 +46,21 @@ This repository should be structured such that it can be distributed as a python
 Current structure:
 ```
 .
-├── .git/                  		# Git repository for pl2docx project
-├── planning_notes/                  # notes about architecture decisions, etc
+├── .git/                          # Git repository for pl2docx project
+├── planning_notes/                # notes about architecture decisions, etc
+├── src/pl2docx/                   # package source (uv src layout)
+│   ├── config.py                  # Config dataclass + load_config() (reads config.yaml)
+│   ├── csrf.py                    # extract_csrf_token() - scrape PL's per-request CSRF token
+│   ├── pl_client.py               # PLClient - drives the real PL server (auth, effective-user,
+│   │                               #   instance create/regenerate, blank/key HTML fetch)
+│   └── fetch.py                   # CLI entry point (python -m pl2docx.fetch / `pl2docx-fetch`)
+├── tests/
+│   ├── test_csrf.py                        # unit tests, no live server needed
+│   └── test_pl_client_integration.py       # full flow against the real local server;
+│                                             #   self-skips if config.yaml or the server is absent
+├── config.example.yaml            # template - copy to config.yaml (gitignored) and fill in
+├── pyproject.toml                 # uv-managed; Python 3.14, deps: requests/beautifulsoup4/pyyaml
+└── output/                        # fetched instance HTML (gitignored, created at runtime)
 ```
 
 Update this repository structure description as needed when significant changes are made to the folder structure or organization of files.
