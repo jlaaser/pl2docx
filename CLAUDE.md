@@ -38,6 +38,19 @@ Design/planning notes:
 - This is a standalone tool. Don't introduce a dependency from core tool code onto any
   specific course's custom packages — course-specific rendering goes through the adapter
   interface, not direct imports.
+  
+## Repository structure
+
+This repository should be structured such that it can be distributed as a python package that other users can download and install.
+
+Current structure:
+```
+.
+├── .git/                  		# Git repository for pl2docx project
+├── planning_notes/                  # notes about architecture decisions, etc
+```
+
+Update this repository structure description as needed when significant changes are made to the folder structure or organization of files.
 
 ## Architecture (see planning doc for full rationale)
 
@@ -67,12 +80,61 @@ not guessed at up front.
 ## Tooling / environment
 
 - Language: Python (confirmed — readability/comfort priority over alternatives).
+	- **Python interpreter**: use Python 3.14 (`py -3.14` via the Windows `py` launcher) for all
+  local Python work in this repo — running scripts, running pytest, installing packages for
+  local verification. The Anaconda 3.9 install on this machine is legacy and may have a broken
+  environment (numpy/ssl DLL issues have been observed there); don't fall back to it.
+  - For all critical functionality, write appropriate pytest tests and place them in the test directory. Verify that all tests pass before committing changes.
 - Package manager: **uv**.
 - Docx templating: **docxtpl** (fall back to raw `python-docx` only if a merge pattern
   doesn't fit docxtpl's Jinja-style model).
 - Headless browser tooling for the `pl-drawing` fallback: **Playwright**.
-- Local PL server: `<HOW_TO_START_LOCAL_PL_SERVER>` — TBD with Claude Code once working
-  against the real PL clone (setup, seed data, auth for the "view as student" flow).
+- **Local PrairieLearn Server**: a local PrairieLearn dev instance
+  is running via wsl and Docker at http://localhost:3000/.  If this does not load, it can be restarted by running `docker run -it --rm -p 3000:3000 -v ~/pl-pitt-chem0110:/course prairielearn/prairielearn` in wsl.  If this fails, ask for help - it may require the user to perform a manual restart.
+  
+## Docstrings
+
+Use **NumPy-style** docstrings. Required elements:
+
+- One-line summary stating *what* the function does (its result/effect), not how it's
+  implemented.
+- `Parameters` section: every parameter with its type and its physical/domain meaning,
+  not just a restatement of the type. State units explicitly for any non-dimensionless
+  numeric quantity.
+- `Returns` section: same standard as above.
+- `Raises` section if the function can raise on invalid input.
+- A `Notes` section whenever there's a non-obvious assumption, invariant, or edge case —
+  in particular, state explicitly whether a function assumes its input represents a
+  physically *valid* configuration or operates correctly on arbitrary/invalid states too
+  (this distinction matters throughout this codebase; see the chemutils section above).
+- A short `Examples` block is encouraged but not required, especially for anything
+  non-obvious from the signature alone.
+
+Example:
+
+```python
+def hund_violations(system: OrbitalSystem) -> list[EnergyLevel]:
+    """Identify degenerate energy levels that violate Hund's rule of maximum multiplicity.
+
+    Parameters
+    ----------
+    system : OrbitalSystem
+        The orbital system to check. May represent a physically invalid
+        configuration; this function does not assume `system` is otherwise
+        valid.
+
+    Returns
+    -------
+    list[EnergyLevel]
+        Energy levels whose degenerate slot group violates Hund's rule. Empty
+        if none. Non-degenerate levels are never included.
+
+    Notes
+    -----
+    Checks Hund's rule in isolation from Aufbau and Pauli exclusion — a level
+    can appear here even if it also has other violations.
+    """
+```
 
 ## Open design decisions (not yet resolved — see planning doc "Open items")
 
@@ -93,3 +155,11 @@ not guessed at up front.
 - Math renders correctly in the resulting Word doc (spot-check against source LaTeX).
 - N regenerations produce N distinct, correctly-paired blank/key docs with no state
   leakage between versions.
+
+## Working style
+
+- For anything nontrivial (schema changes, changes touching multiple
+  submodules), propose a short plan before writing code, and wait for confirmation.
+- Prefer small, independently verifiable increments over large multi-part changes.
+- If existing conventions in this repo conflict with general best practice, follow the
+  existing convention and note the discrepancy rather than silently introducing a new style.
