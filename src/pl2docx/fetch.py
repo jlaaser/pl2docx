@@ -42,9 +42,13 @@ def fetch_n_instances(config: Config) -> list[int]:
     -----
     Each instance is fully processed (blank fetch, close, key fetch) before
     the next one is created, so instances never overlap in "open" state.
+    Relies on the authenticated user already having course role Previewer or
+    above (true for any instructor account) so PL's "Student view without
+    access restrictions" bypass applies automatically; see `PLClient`'s
+    module docstring for why this tool deliberately does not use the
+    "view as student" role-override mechanism.
     """
     client = PLClient(config.base_url)
-    client.enter_effective_user(config.course_instance_id)
 
     instance_ids: list[int] = []
     for i in range(config.n_instances):

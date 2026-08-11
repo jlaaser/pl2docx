@@ -16,7 +16,10 @@ PrairieLearn reference material (use these, don't rely on memory for platform sp
 - Docs: https://docs.prairielearn.com/
 - Source repo: https://github.com/PrairieLearn/PrairieLearn
 - A read-only reference clone of the PrairieLearn repo lives at: ../../PrairieLearn
-  Treat this as documentation only — never edit it. 
+  Treat this as documentation only — never edit it. This clone can go stale relative to
+  upstream (e.g. it missed the newer `accessControl` system for a while) — if research
+  against it turns up something that seems to contradict current PL docs or behavior,
+  ask the user to `git pull` it before concluding a feature doesn't exist.
   
 Course reference:
 - Original course repo this was designed against: `../../chem 0110/pl-pitt-chem0110`
@@ -67,9 +70,23 @@ Update this repository structure description as needed when significant changes 
 
 ## Architecture (see planning doc for full rationale)
 
-1. **Instance generation** — drive a real local PL server via the "view as student"
-   mechanism (`instructorEffectiveUser`), then `studentAssessment` / `regenerate_instance`
-   to create/recreate real `assessment_instances` rows.
+1. **Instance generation** — drive a real local PL server as an authenticated course
+   staff member (Previewer role or above), hitting the real student-facing routes
+   directly (GET the assessment page, POST `__action=regenerate_instance` to the
+   resulting `assessment_instance` page) to create/recreate real `assessment_instances`
+   rows. **Correction (2026-08-10):** earlier versions of this doc recommended the
+   "view as student" role-override mechanism (`instructorEffectiveUser`,
+   `pl_requested_course_role=None`). That was wrong for this tool's actual goal:
+   overriding down to plain "Student" makes PL enforce the assessment's real
+   `accessControl` rules, which 403s when none are configured — exactly what this tool
+   wants (to avoid ever exposing a real exam/quiz to real students via access windows).
+   Instead, staying at the authenticated user's real staff role and skipping any role
+   override triggers PL's "Student view without access restrictions" bypass
+   (`lib/assessment-access-control/resolver.ts`'s `isStaff()` check short-circuits past
+   `accessControl` entirely for Previewer+ roles) — same routes, same downstream
+   instance-creation code, no access rules needed. Also note: the `regenerate_instance`
+   POST goes to the *`assessment_instance`* page (that's where PL's own regenerate form
+   submits, since it has no `action` attribute), not the `assessment` page.
 2. **Blank copy** — GET each `instance_question/:id` while the instance is open.
 3. **Answer key** — POST `__action=finish` to close the instance, then re-GET the same
    `instance_question` URLs (same variant, `showCorrectAnswer` now true).

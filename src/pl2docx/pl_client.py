@@ -4,11 +4,27 @@ Route paths and `__action` literals used here were verified against the PL
 source (reference clone) rather than guessed, per this project's ground rule
 against confidently-guessed PrairieLearn scaffolding:
 
-- ``instructorEffectiveUser``: ``apps/prairielearn/src/pages/instructorEffectiveUser/instructorEffectiveUser.ts``
 - ``regenerate_instance``: ``apps/prairielearn/src/middlewares/studentAssessmentAccess.ts:67``
 - ``finish``: ``apps/prairielearn/src/pages/studentAssessmentInstance/studentAssessmentInstance.ts:162``
 - instance_question links: rendered by
   ``apps/prairielearn/src/pages/studentAssessmentInstance/studentAssessmentInstance.html.ts:1082``
+
+Deliberately does *not* use the "view as student" role-override mechanism
+(``instructorEffectiveUser``) that an earlier version of this project's
+planning docs recommended. That mechanism overrides the caller's course role
+down to plain "Student", which makes PL evaluate the assessment's real
+``accessControl``/``allowAccess`` rules — an assessment with none configured
+(as this tool wants, to avoid ever exposing a real exam/quiz to students)
+then 403s. Instead, this client hits the student-facing routes directly
+*without* any role-override cookies. As long as the authenticated user's
+real course role is Previewer or above (true for any instructor account),
+PL's access resolver short-circuits past the rule check entirely and grants
+access — this is exactly the "Student view without access restrictions"
+navbar option, which is not a separate action but simply the absence of a
+role override (``lib/assessment-access-control/resolver.ts:219-225,444`` —
+``isStaff()`` returns ``STAFF_OVERRIDE_RESULT`` before ``pickEffectiveRule``
+is ever called). The routes and downstream instance-creation code hit are
+otherwise identical to genuine student access.
 """
 
 from __future__ import annotations
@@ -75,9 +91,6 @@ class PLClient:
         response.raise_for_status()
         return response
 
-    def _instructor_effective_user_url(self, course_instance_id: int) -> str:
-        return f"{self.base_url}/pl/course_instance/{course_instance_id}/instructor/effectiveUser"
-
     def _assessment_url(self, course_instance_id: int, assessment_id: int) -> str:
         return f"{self.base_url}/pl/course_instance/{course_instance_id}/assessment/{assessment_id}"
 
@@ -91,35 +104,6 @@ class PLClient:
         return (
             f"{self.base_url}/pl/course_instance/{course_instance_id}"
             f"/instance_question/{instance_question_id}/"
-        )
-
-    def enter_effective_user(self, course_instance_id: int) -> None:
-        """Enter "view as student" mode for the given course instance.
-
-        Parameters
-        ----------
-        course_instance_id : int
-            Numeric PL course_instance id.
-
-        Notes
-        -----
-        Sets both the course-role and course-instance-role overrides to
-        "None" (i.e. plain student), matching a real student's effective
-        permissions. Requires only course-preview permission on the
-        authenticated dev user, not site-admin
-        (``middlewares/authzCourseOrInstance.ts``).
-        """
-        url = self._instructor_effective_user_url(course_instance_id)
-        self._post_with_fresh_csrf(
-            url,
-            {"__action": "changeCourseRole", "pl_requested_course_role": "None"},
-        )
-        self._post_with_fresh_csrf(
-            url,
-            {
-                "__action": "changeCourseInstanceRole",
-                "pl_requested_course_instance_role": "None",
-            },
         )
 
     def create_or_regenerate_instance(self, course_instance_id: int, assessment_id: int) -> int:
@@ -141,15 +125,24 @@ class PLClient:
         -----
         Always produces a genuinely fresh instance: a first GET of the
         assessment page creates an instance if none exists yet (real
-        `makeAssessmentInstance`, per the project's planning doc), then this
-        method always additionally POSTs `__action=regenerate_instance`
-        (`middlewares/studentAssessmentAccess.ts:67`) to delete and recreate
-        it, so repeated calls reliably yield distinct instances rather than
-        reusing whatever existed before this call.
+        `makeAssessmentInstance`, per the project's planning doc) and
+        redirects to that instance's `assessment_instance` page, then this
+        method always additionally POSTs `__action=regenerate_instance` to
+        *that* `assessment_instance` URL to delete and recreate it, so
+        repeated calls reliably yield distinct instances rather than reusing
+        whatever existed before this call. The regenerate form has no
+        `action` attribute in PL's own markup, so it (and this client) posts
+        to the current `assessment_instance` page, not the `assessment`
+        page — confirmed by inspecting the live rendered form, since this
+        differs from where the `studentAssessmentAccess` middleware was
+        found to be *registered* versus where the actual UI submits to.
         """
         assessment_url = self._assessment_url(course_instance_id, assessment_id)
-        self._get(assessment_url)  # ensures an instance exists (creates one if needed)
-        response = self._post_with_fresh_csrf(assessment_url, {"__action": "regenerate_instance"})
+        # Ensures an instance exists (creates one if needed) and gives us its
+        # assessment_instance URL via the redirect.
+        landing_page = self._get(assessment_url)
+        instance_url = landing_page.url
+        response = self._post_with_fresh_csrf(instance_url, {"__action": "regenerate_instance"})
         return self._extract_assessment_instance_id(response.url)
 
     @staticmethod
