@@ -1,0 +1,40 @@
+<div class="question-block">
+  <div class="card-header bg-primary text-white"><h1>Sample Multiple Choice Question With Custom Explanation</h1></div>
+  <div class="card-body question-body">
+    <p>Which of these statements is true?</p>
+    <div class="form-check d-flex">
+      <input type="radio" name="statement" value="a" id="mc2-a" disabled>
+      <label class="form-check-label" for="mc2-a">
+        <div class="pl-multiple-choice-key-label">(A)</div>
+        <div class="pl-multiple-choice-answer">Option A text</div>
+      </label>
+    </div>
+    <div class="form-check d-flex">
+      <input type="radio" name="statement" value="b" id="mc2-b" disabled checked>
+      <label class="form-check-label" for="mc2-b">
+        <div class="pl-multiple-choice-key-label">(B)</div>
+        <div class="pl-multiple-choice-answer">Option B text</div>
+      </label>
+    </div>
+  </div>
+</div>
+<div class="card mb-3 grading-block">
+  <div class="card-header bg-secondary text-white"><h2>Correct answer</h2></div>
+  <div class="card-body overflow-x-auto answer-body">
+    <!-- author wrapped PL's default answer list in <pl-hide-in-panel answer="true">,
+         which renders to nothing here, and supplied custom explanatory text instead -->
+    <p>Option B is correct because it is the only statement consistent with the setup described above.</p>
+  </div>
+</div>
+<div class="card mb-4" id="question-score-panel">
+  <div class="card-header bg-secondary text-white"><h2>Question U1.1</h2></div>
+  <table class="table table-sm two-column-description-no-header" id="question-score-panel-content">
+    <tbody>
+      <tr><td>Value:</td><td>
+    2
+    <button type="button" class="btn btn-xs js-value-popover"><i class="fa fa-question-circle" aria-hidden="true"></i></button>
+  </td></tr>
+      <tr><td>Total points:</td><td>0/2</td></tr>
+    </tbody>
+  </table>
+</div>

@@ -122,6 +122,14 @@ a second real use case.
   (`pl-scinum-input`, `pl-symbolic-input`, `pl-image-capture`, `pl-chemformula-input`,
   etc.) — likely fall under Phase 2/3's generic input-rendering path, confirm case by
   case.
+- **Compound questions with multiple named input widgets on one page** (confirmed real
+  content, not hypothetical: `physical-or-chemical` renders 3 separate
+  `pl-multiple-choice` sub-statements, each its own widget with a distinct `name`, e.g.
+  via `display="dropdown"`; `previous-experience` combines a radio group and a text box
+  on one page). Phase 2's `ParsedQuestion`/`html_parser.py` deliberately rejects these
+  (`UnsupportedElementError`) rather than mis-rendering — real fix needs
+  `ParsedQuestion`'s one-widget-per-question shape reworked to hold multiple named
+  sub-answers per question.
 - Document the Option-1 manual/Cowork fallback path for any question that still doesn't
   fit.
 

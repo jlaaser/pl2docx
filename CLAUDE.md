@@ -56,15 +56,35 @@ Current structure:
 │   ├── csrf.py                    # extract_csrf_token() - scrape PL's per-request CSRF token
 │   ├── pl_client.py               # PLClient - drives the real PL server (auth, effective-user,
 │   │                               #   instance create/regenerate, blank/key HTML fetch)
-│   └── fetch.py                   # CLI entry point (python -m pl2docx.fetch / `pl2docx-fetch`)
+│   ├── fetch.py                   # CLI entry point (python -m pl2docx.fetch / `pl2docx-fetch`)
+│   ├── html_parser.py             # parse_instance_question_html() -> ParsedQuestion; supports
+│   │                               #   pl-multiple-choice/checkbox/string-input/integer-input only
+│   │                               #   (Phase 2) - raises UnsupportedElementError for anything else,
+│   │                               #   compound multi-widget questions, or unrecognized answer-key shapes
+│   ├── docx_builder.py            # build_document() - ParsedQuestions -> docx via docxtpl subdoc;
+│   │                               #   template needs a `{{p content }}` placeholder (see note below)
+│   └── render.py                  # CLI entry point (python -m pl2docx.render / `pl2docx-render`) -
+│                                   #   renders one fetch.py output/<instance>/ dir into blank+key docx
 ├── tests/
-│   ├── test_csrf.py                        # unit tests, no live server needed
-│   └── test_pl_client_integration.py       # full flow against the real local server;
+│   ├── conftest.py                          # minimal_template fixture (generated at test time)
+│   ├── fixtures/instance_question/          # synthetic (not real course content) sample HTML,
+│   │                                         #   one blank+key pair per Phase 2 element kind
+│   ├── test_csrf.py                         # unit tests, no live server needed
+│   ├── test_html_parser.py                  # unit tests, no live server needed
+│   ├── test_docx_builder.py                 # unit tests, no live server needed
+│   └── test_pl_client_integration.py        # full flow against the real local server;
 │                                             #   self-skips if config.yaml or the server is absent
 ├── config.example.yaml            # template - copy to config.yaml (gitignored) and fill in
-├── pyproject.toml                 # uv-managed; Python 3.14, deps: requests/beautifulsoup4/pyyaml
-└── output/                        # fetched instance HTML (gitignored, created at runtime)
+├── pyproject.toml                 # uv-managed; Python 3.14, deps: requests/beautifulsoup4/pyyaml/
+│                                   #   docxtpl/docxcompose
+└── output/                        # fetched instance HTML + generated docx (gitignored, runtime)
 ```
+
+**docxtpl gotcha**: inserting a `docxtpl.Subdoc` (from `doc.new_subdoc()`) requires the
+template placeholder to be `{{p content }}` — the `p` prefix is docxtpl's paragraph-level
+substitution syntax. Plain `{{ content }}` silently produces a broken docx (the subdoc's
+raw XML ends up as literal text inside the placeholder's own run, invisible to
+`python-docx`'s normal readers) — confirmed by testing both forms while building Phase 2.
 
 Update this repository structure description as needed when significant changes are made to the folder structure or organization of files.
 
@@ -97,8 +117,17 @@ Update this repository structure description as needed when significant changes 
      load question, wait for fabric init, call `canvas.toSVG()` directly.
 5. **HTML → Word** — purpose-built conversion layer (not generic pandoc), with
    run-time-configurable formatting per element type (e.g. MC as lettered list vs.
-   fillable bubbles). Math via LaTeX → OMML. Template merge via `<TEMPLATING_LIBRARY>`
-   (e.g. docxtpl / python-docx).
+   fillable bubbles). Math via LaTeX → OMML. Template merge via **docxtpl**
+   (`html_parser.py` + `docx_builder.py`, see Repository structure above).
+   **Phase 2 status**: implemented for `pl-multiple-choice`/`pl-checkbox`/
+   `pl-string-input`/`pl-integer-input` only, with fixed (not yet configurable —
+   Phase 3) rendering, plain-text prompts (no math/rich HTML — Phase 4). Verified
+   against real fetched content that some real questions fall outside this: (a)
+   questions with custom-authored per-choice answer *explanations* instead of PL's
+   default `<ul><li>` correct-answer list, and (b) compound questions embedding more
+   than one input widget (e.g. a radio group *and* a text box on one page). Both
+   raise `UnsupportedElementError` rather than silently mis-rendering; widening
+   support for either is unscoped future work, not a Phase 2 bug.
 
 ## Extensibility
 
@@ -117,7 +146,8 @@ not guessed at up front.
   - For all critical functionality, write appropriate pytest tests and place them in the test directory. Verify that all tests pass before committing changes.
 - Package manager: **uv**.
 - Docx templating: **docxtpl** (fall back to raw `python-docx` only if a merge pattern
-  doesn't fit docxtpl's Jinja-style model).
+  doesn't fit docxtpl's Jinja-style model) + **docxcompose** (docxtpl's subdoc feature
+  requires it). See the `{{p content }}` gotcha noted under Repository structure.
 - Headless browser tooling for the `pl-drawing` fallback: **Playwright**.
 - **Local PrairieLearn Server**: a local PrairieLearn dev instance
   is running via wsl and Docker at http://localhost:3000/.  If this does not load, it can be restarted by running `docker run -it --rm -p 3000:3000 -v ~/pl-pitt-chem0110:/course prairielearn/prairielearn` in wsl.  If this fails, ask for help - it may require the user to perform a manual restart.
@@ -173,6 +203,12 @@ def hund_violations(system: OrbitalSystem) -> list[EnergyLevel]:
 - `pl-order-blocks` print representation.
 - Docx templating mechanics for merging instructor template with generated content.
 - Repo name / license / packaging.
+- **Compound questions with multiple named input widgets on one page** (confirmed real
+  content: `physical-or-chemical`'s 3 separate `pl-multiple-choice` dropdown
+  sub-statements; `previous-experience`'s radio group + text box). Currently rejected by
+  `html_parser.py` (`UnsupportedElementError`) rather than mis-rendered — needs
+  `ParsedQuestion` reworked to hold multiple named sub-answers per question. Deferred to
+  a later phase per explicit user direction (2026-08-11).
 
 ## Verification checklist (once implemented)
 
