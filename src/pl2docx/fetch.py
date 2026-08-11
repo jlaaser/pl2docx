@@ -9,18 +9,86 @@ Usage
 
 from __future__ import annotations
 
+import json
 import sys
+from dataclasses import asdict
 from pathlib import Path
+from urllib.parse import urljoin
+
+from bs4 import BeautifulSoup
 
 from pl2docx.config import Config, load_config
-from pl2docx.pl_client import PLClient
+from pl2docx.pl_client import PLClient, ZoneGroup
 
 
-def _write_html(output_dir: Path, assessment_instance_id: int, subdir: str, pages: dict[int, str]) -> None:
+def _download_images(client: PLClient, files_dir: Path, instance_question_id: int, html: str) -> str:
+    """Download same-origin `<img>`s referenced in `html`, rewriting their `src` to local paths.
+
+    Parameters
+    ----------
+    client : PLClient
+        Used to fetch each image with the same authenticated session the
+        page itself was fetched with.
+    files_dir : pathlib.Path
+        Directory (created if needed) to save downloaded images into,
+        alongside the HTML that references them.
+    instance_question_id : int
+        The page's `instance_question_id`, used as a filename prefix so
+        images from different questions never collide.
+    html : str
+        Raw page HTML, as fetched.
+
+    Returns
+    -------
+    str
+        `html` with same-origin `<img src>` values rewritten to
+        `files/<local filename>`, relative to the HTML file's own location.
+
+    Notes
+    -----
+    Only downloads same-origin (root-relative or `client.base_url`-prefixed)
+    image URLs — the ones confirmed to require this session's auth and, for
+    server-generated images, to not be guaranteed stable at a fixed URL
+    long-term (variant-scoped `generatedFilesQuestion` paths). Externally
+    hosted images are left as-is.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    images = [img for img in soup.find_all("img", src=True) if _is_same_origin(client.base_url, img["src"])]
+    if not images:
+        return html
+
+    files_dir.mkdir(parents=True, exist_ok=True)
+    for index, img in enumerate(images):
+        src = img["src"]
+        absolute_url = urljoin(client.base_url, src)
+        original_name = Path(src.split("?", 1)[0]).name or f"image_{index}"
+        local_name = f"{instance_question_id}_{index}_{original_name}"
+        (files_dir / local_name).write_bytes(client.fetch_binary(absolute_url))
+        img["src"] = f"files/{local_name}"
+    return str(soup)
+
+
+def _is_same_origin(base_url: str, src: str) -> bool:
+    return src.startswith("/") or src.startswith(base_url)
+
+
+def _write_html(
+    client: PLClient, output_dir: Path, assessment_instance_id: int, subdir: str, pages: dict[int, str]
+) -> None:
     instance_dir = output_dir / str(assessment_instance_id) / subdir
     instance_dir.mkdir(parents=True, exist_ok=True)
+    files_dir = instance_dir / "files"
     for instance_question_id, html in pages.items():
+        html = _download_images(client, files_dir, instance_question_id, html)
         (instance_dir / f"{instance_question_id}.html").write_text(html, encoding="utf-8")
+
+
+def _write_structure(output_dir: Path, assessment_instance_id: int, zones: list[ZoneGroup]) -> None:
+    instance_dir = output_dir / str(assessment_instance_id)
+    instance_dir.mkdir(parents=True, exist_ok=True)
+    (instance_dir / "structure.json").write_text(
+        json.dumps([asdict(zone) for zone in zones], indent=2), encoding="utf-8"
+    )
 
 
 def fetch_n_instances(config: Config) -> list[int]:
@@ -47,6 +115,12 @@ def fetch_n_instances(config: Config) -> list[int]:
     access restrictions" bypass applies automatically; see `PLClient`'s
     module docstring for why this tool deliberately does not use the
     "view as student" role-override mechanism.
+
+    Also saves, per instance: any same-origin images referenced in the
+    fetched HTML (under `<instance>/{blank,key}/files/`, with the HTML's
+    `<img src>` rewritten to match), and the assessment's zone/question
+    structure (`<instance>/structure.json`) — both captured now so later
+    rendering work doesn't need a live server or a second fetch.
     """
     client = PLClient(config.base_url)
 
@@ -57,15 +131,16 @@ def fetch_n_instances(config: Config) -> list[int]:
         )
         print(f"[{i + 1}/{config.n_instances}] created assessment_instance {assessment_instance_id}")
 
-        instance_question_ids = client.list_instance_questions(
-            config.course_instance_id, assessment_instance_id
-        )
+        zones = client.list_instance_questions(config.course_instance_id, assessment_instance_id)
+        _write_structure(config.output_dir, assessment_instance_id, zones)
+        instance_question_ids = [iq_id for zone in zones for iq_id in zone.instance_question_ids]
+
         blank_html = client.fetch_instance_questions(config.course_instance_id, instance_question_ids)
-        _write_html(config.output_dir, assessment_instance_id, "blank", blank_html)
+        _write_html(client, config.output_dir, assessment_instance_id, "blank", blank_html)
 
         client.close_instance(config.course_instance_id, assessment_instance_id)
         key_html = client.fetch_instance_questions(config.course_instance_id, instance_question_ids)
-        _write_html(config.output_dir, assessment_instance_id, "key", key_html)
+        _write_html(client, config.output_dir, assessment_instance_id, "key", key_html)
 
         instance_ids.append(assessment_instance_id)
 

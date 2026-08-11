@@ -55,8 +55,13 @@ Current structure:
 │   ├── config.py                  # Config dataclass + load_config() (reads config.yaml)
 │   ├── csrf.py                    # extract_csrf_token() - scrape PL's per-request CSRF token
 │   ├── pl_client.py               # PLClient - drives the real PL server (auth, effective-user,
-│   │                               #   instance create/regenerate, blank/key HTML fetch)
-│   ├── fetch.py                   # CLI entry point (python -m pl2docx.fetch / `pl2docx-fetch`)
+│   │                               #   instance create/regenerate, blank/key HTML fetch,
+│   │                               #   binary/image fetch); parse_zone_groups() - pure fn parsing
+│   │                               #   zone/question structure from the assessment_instance page
+│   ├── fetch.py                   # CLI entry point (python -m pl2docx.fetch / `pl2docx-fetch`) -
+│   │                               #   also downloads same-origin <img>s into files/ next to each
+│   │                               #   instance_question's HTML, rewriting src to the local path,
+│   │                               #   and writes structure.json (zone titles + question order/ids)
 │   ├── html_parser.py             # parse_instance_question_html() -> ParsedQuestion; supports
 │   │                               #   pl-multiple-choice/checkbox/string-input/integer-input only
 │   │                               #   (Phase 2) - raises UnsupportedElementError for anything else,
@@ -72,12 +77,16 @@ Current structure:
 │   ├── test_csrf.py                         # unit tests, no live server needed
 │   ├── test_html_parser.py                  # unit tests, no live server needed
 │   ├── test_docx_builder.py                 # unit tests, no live server needed
+│   ├── test_pl_client.py                    # unit tests for parse_zone_groups(), no live server needed
+│   ├── test_fetch.py                        # unit tests for image download/rewrite, no live server needed
 │   └── test_pl_client_integration.py        # full flow against the real local server;
 │                                             #   self-skips if config.yaml or the server is absent
 ├── config.example.yaml            # template - copy to config.yaml (gitignored) and fill in
 ├── pyproject.toml                 # uv-managed; Python 3.14, deps: requests/beautifulsoup4/pyyaml/
 │                                   #   docxtpl/docxcompose
-└── output/                        # fetched instance HTML + generated docx (gitignored, runtime)
+└── output/                        # fetched instance HTML + generated docx (gitignored, runtime);
+                                    #   per instance: blank/, key/ (each with a files/ subdir of
+                                    #   downloaded images), and structure.json (zone/question layout)
 ```
 
 **docxtpl gotcha**: inserting a `docxtpl.Subdoc` (from `doc.new_subdoc()`) requires the
@@ -107,9 +116,17 @@ Update this repository structure description as needed when significant changes 
    instance-creation code, no access rules needed. Also note: the `regenerate_instance`
    POST goes to the *`assessment_instance`* page (that's where PL's own regenerate form
    submits, since it has no `action` attribute), not the `assessment` page.
-2. **Blank copy** — GET each `instance_question/:id` while the instance is open.
+2. **Blank copy** — GET each `instance_question/:id` while the instance is open. Also
+   downloads any same-origin `<img>`s embedded in the page (saved to a `files/` folder
+   next to the HTML, `<img src>` rewritten to the local path) — done at fetch time, not
+   deferred to rendering, since some image URLs (`generatedFilesQuestion`) are keyed to a
+   variant id and aren't guaranteed stable long-term
+   (`planning_notes/2026-08-11 image and metadata fetch plus roadmap notes.md`).
 3. **Answer key** — POST `__action=finish` to close the instance, then re-GET the same
    `instance_question` URLs (same variant, `showCorrectAnswer` now true).
+   `list_instance_questions`/`parse_zone_groups` also capture zone titles and question
+   order from the assessment-instance overview page (only place zone titles exist),
+   persisted per instance as `structure.json` — not yet consumed by rendering (Phase 3).
 4. **Static rendering of interactive elements**:
    - Course-owned fabric.js elements (e.g. `pl-orbitaldiagram`, future `pl-lewisstructure`):
      parse embedded `layout_json` straight out of fetched HTML, render locally as SVG.
@@ -209,6 +226,19 @@ def hund_violations(system: OrbitalSystem) -> list[EnergyLevel]:
   `html_parser.py` (`UnsupportedElementError`) rather than mis-rendered — needs
   `ParsedQuestion` reworked to hold multiple named sub-answers per question. Deferred to
   a later phase per explicit user direction (2026-08-11).
+- **Document-structure-level formatting configuration** (Phase 3, in addition to
+  per-element-type formatting): whether question titles are shown vs. numbered (using the
+  QID — always available via each page's "Staff information" panel, confirmed not gated
+  on assessment type — as the instructor-facing reference when numbered/hidden), and
+  whether/how zone titles are displayed (data now captured in `structure.json`, see
+  `planning_notes/2026-08-11 image and metadata fetch plus roadmap notes.md`). The user
+  may want additional document-level options beyond these — ask for their full list
+  before planning Phase 3, don't assume this is complete.
+- **Rich HTML → docx conversion and image embedding** (Phase 4, reframed from "Math
+  rendering" — same underlying "walk the HTML and convert it properly" work): paragraphs/
+  bold/italic/underline, currently flattened to plain text by `html_parser.py`'s
+  `get_text()`; inline images, now downloaded and saved locally at fetch time
+  (`fetch.py`'s `files/` folders) but not yet embedded in generated docx; math → OMML.
 
 ## Verification checklist (once implemented)
 
@@ -229,3 +259,9 @@ def hund_violations(system: OrbitalSystem) -> list[EnergyLevel]:
 - Prefer small, independently verifiable increments over large multi-part changes.
 - If existing conventions in this repo conflict with general best practice, follow the
   existing convention and note the discrepancy rather than silently introducing a new style.
+- **Whenever a change touches rendering** (fetch output, HTML parsing, or docx
+  generation), regenerate `output/` with at least 3 example instances — fetched HTML,
+  downloaded images, and rendered blank+key docx included — so the user can look them
+  over before approving. Old rendered examples don't need to persist between turns (fine
+  to overwrite/delete when new ones are generated), but they must exist for the user to
+  inspect, not just be used internally for verification and then discarded.

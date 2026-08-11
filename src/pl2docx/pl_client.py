@@ -6,8 +6,16 @@ against confidently-guessed PrairieLearn scaffolding:
 
 - ``regenerate_instance``: ``apps/prairielearn/src/middlewares/studentAssessmentAccess.ts:67``
 - ``finish``: ``apps/prairielearn/src/pages/studentAssessmentInstance/studentAssessmentInstance.ts:162``
-- instance_question links: rendered by
-  ``apps/prairielearn/src/pages/studentAssessmentInstance/studentAssessmentInstance.html.ts:1082``
+- instance_question links and zone grouping: rendered by
+  ``apps/prairielearn/src/pages/studentAssessmentInstance/components/QuestionTableBody.tsx:49-119``
+  (one ``<tbody>`` per zone; a ``<tr><th scope="rowgroup">`` row holding the zone's
+  ``<span>`` title, when it has one, precedes that zone's ``instance_question`` rows).
+- image URLs embedded in question HTML (e.g. ``clientFilesCourse``) are mounted inside
+  the same authenticated ``instance_question`` route tree
+  (``apps/prairielearn/src/server.ts:1522``) — no separate public path — and some
+  (``generatedFilesQuestion``) are keyed to a variant id rather than the question, so are
+  not guaranteed stable at a fixed URL long-term; download promptly rather than persisting
+  just the URL.
 
 Deliberately does *not* use the "view as student" role-override mechanism
 (``instructorEffectiveUser``) that an earlier version of this project's
@@ -30,11 +38,73 @@ otherwise identical to genuine student access.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 import requests
 from bs4 import BeautifulSoup
 
 from pl2docx.csrf import extract_csrf_token
+
+
+@dataclass(frozen=True)
+class ZoneGroup:
+    """One zone's worth of `instance_question`s, in on-page order.
+
+    Parameters
+    ----------
+    title : str or None
+        The zone's title, as shown on the assessment-instance overview page.
+        `None` if the zone has no title (PL doesn't require one).
+    instance_question_ids : list[int]
+        `instance_question_id` values belonging to this zone, in the order
+        they appear on the page.
+    """
+
+    title: str | None
+    instance_question_ids: list[int]
+
+
+def parse_zone_groups(html: str) -> list[ZoneGroup]:
+    """Parse an assessment-instance overview page's zone/question structure.
+
+    Parameters
+    ----------
+    html : str
+        Raw HTML of an `assessment_instance/:id` overview page.
+
+    Returns
+    -------
+    list[ZoneGroup]
+        One entry per zone with at least one `instance_question` link,
+        in page order. Zones with no questions (shouldn't normally occur)
+        are omitted; empty list if the page has no recognizable zone/
+        question table at all.
+
+    Notes
+    -----
+    Pure/offline: does no I/O, so it's testable against a saved HTML
+    fixture without a live server. See `PLClient.list_instance_questions`,
+    which is the network-fetching counterpart that calls this.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    iq_pattern = re.compile(r"/instance_question/(\d+)/?")
+
+    zones: list[ZoneGroup] = []
+    seen: set[int] = set()
+    for tbody in soup.find_all("tbody"):
+        title_tag = tbody.select_one('th[scope="rowgroup"] span')
+        title = title_tag.get_text(strip=True) if title_tag else None
+        ids: list[int] = []
+        for link in tbody.find_all("a", href=True):
+            match = iq_pattern.search(link["href"])
+            if match:
+                iq_id = int(match.group(1))
+                if iq_id not in seen:
+                    seen.add(iq_id)
+                    ids.append(iq_id)
+        if ids:
+            zones.append(ZoneGroup(title=title, instance_question_ids=ids))
+    return zones
 
 
 class PLClientError(RuntimeError):
@@ -82,6 +152,24 @@ class PLClient:
         response = self.session.get(url)
         response.raise_for_status()
         return response
+
+    def fetch_binary(self, url: str) -> bytes:
+        """Fetch a binary resource (e.g. an embedded image) using the same session.
+
+        Parameters
+        ----------
+        url : str
+            Absolute URL to fetch, e.g. an `<img src>` value resolved against
+            `base_url`. Same-origin PL URLs (question images included)
+            require this client's authenticated session, same as every
+            other request this class makes.
+
+        Returns
+        -------
+        bytes
+            The raw response body.
+        """
+        return self._get(url).content
 
     def _post_with_fresh_csrf(self, url: str, data: dict[str, str]) -> requests.Response:
         """POST to `url`, scraping a fresh CSRF token from a GET of `url` first."""
@@ -154,8 +242,10 @@ class PLClient:
             )
         return int(match.group(1))
 
-    def list_instance_questions(self, course_instance_id: int, assessment_instance_id: int) -> list[int]:
-        """List the `instance_question` ids belonging to an assessment instance.
+    def list_instance_questions(
+        self, course_instance_id: int, assessment_instance_id: int
+    ) -> list[ZoneGroup]:
+        """List the `instance_question`s belonging to an assessment instance, by zone.
 
         Parameters
         ----------
@@ -166,33 +256,33 @@ class PLClient:
 
         Returns
         -------
-        list[int]
-            `instance_question_id` values, in the order they appear on the
-            assessment-instance overview page (i.e. question order).
+        list[ZoneGroup]
+            One entry per zone, in the order zones appear on the
+            assessment-instance overview page, each holding that zone's
+            `instance_question_id`s in on-page order.
 
         Raises
         ------
         UnexpectedResponseError
-            If no `instance_question` links are found on the page.
+            If no `instance_question` links are found on the page at all.
+
+        Notes
+        -----
+        The overview page renders one `<tbody>` per zone
+        (`QuestionTableBody.tsx:49-119`), with an optional
+        `<tr><th scope="rowgroup">` zone-title row preceding that zone's
+        question rows. A zone lacking a title still gets a `ZoneGroup`
+        entry (with `title=None`) so instance_question order/grouping is
+        preserved even for untitled zones.
         """
         url = self._assessment_instance_url(course_instance_id, assessment_instance_id)
         response = self._get(url)
-        soup = BeautifulSoup(response.text, "html.parser")
-        pattern = re.compile(r"/instance_question/(\d+)/?")
-        ids: list[int] = []
-        seen: set[int] = set()
-        for link in soup.find_all("a", href=True):
-            match = pattern.search(link["href"])
-            if match:
-                iq_id = int(match.group(1))
-                if iq_id not in seen:
-                    seen.add(iq_id)
-                    ids.append(iq_id)
-        if not ids:
+        zones = parse_zone_groups(response.text)
+        if not zones:
             raise UnexpectedResponseError(
                 f"No instance_question links found on assessment instance page: {url}"
             )
-        return ids
+        return zones
 
     def fetch_instance_questions(
         self, course_instance_id: int, instance_question_ids: list[int]
