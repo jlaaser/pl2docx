@@ -1,11 +1,14 @@
 """Load and resolve Phase 3B's element/question-level formatting preferences.
 
 `config.yaml` may declare a `global-element-preferences` section keyed by PL element
-tag name (`pl-multiple-choice`, `pl-checkbox`, `pl-string-input`, `pl-integer-input`)
-plus an `additional-elements` section for element kinds not natively supported by
-`pl2docx.html_parser` yet, each declaring which built-in behavior class (`selector` or
-`fill-in`) it extends. All keys are optional; an absent or partial section reproduces
-Phase 3A's fixed formatting as closely as the unified `display` vocabulary below allows.
+tag name (`pl-multiple-choice`, `pl-checkbox`, and the built-in fill-in-type elements
+`pl-string-input`/`pl-integer-input`/`pl-number-input`/`pl-symbolic-input`/`pl-units-input`)
+plus an `additional-elements` section for element kinds not natively/built-in supported
+by `pl2docx.html_parser` (typically course-specific elements following the same
+fill-in markup convention, e.g. `pl-scinum-input`), each declaring which built-in
+behavior class (`selector` or `fill-in`) it extends. All keys are optional; an absent
+or partial section reproduces Phase 3A's fixed formatting as closely as the unified
+`display` vocabulary below allows.
 
 Kept intentionally simple (a single global config, resolved by widget `kind` only) per
 `planning_notes/2026-08-12 phase 3a implementation and phase 3b spec.md`'s explicit
@@ -33,12 +36,18 @@ _BUILTIN_KIND_BY_TAG: dict[str, str] = {
     "pl-checkbox": "checkbox",
     "pl-string-input": "string_input",
     "pl-integer-input": "integer_input",
+    "pl-number-input": "number_input",
+    "pl-symbolic-input": "symbolic_input",
+    "pl-units-input": "units_input",
 }
 _BUILTIN_BEHAVIOR_CLASS: dict[str, BehaviorClass] = {
     "multiple_choice": "selector",
     "checkbox": "selector",
     "string_input": "fill-in",
     "integer_input": "fill-in",
+    "number_input": "fill-in",
+    "symbolic_input": "fill-in",
+    "units_input": "fill-in",
 }
 _DEFAULT_LIST_STYLE_BY_KIND: dict[str, ListStyle] = {
     "multiple_choice": "bubble",
@@ -229,3 +238,25 @@ def resolve_preferences(element_config: ElementConfig, kind: str) -> ElementPref
     if behavior_class == "selector":
         return SelectorPreferences(list_style=_DEFAULT_LIST_STYLE_BY_KIND.get(kind, "bubble"))
     return FillInPreferences()
+
+
+def additional_fill_in_tags(element_config: ElementConfig) -> list[str]:
+    """List the `additional-elements` tags declared as extending fill-in behavior.
+
+    Parameters
+    ----------
+    element_config : ElementConfig
+        The run's loaded element configuration.
+
+    Returns
+    -------
+    list[str]
+        PL element tag names (e.g. `["pl-scinum-input"]`) whose `additional-elements`
+        entry declared `type: fill-in`. Meant to be passed straight through to
+        `pl2docx.html_parser.parse_instance_question_html`'s
+        `additional_fill_in_tags` parameter, so the parser also detects these
+        tags' widgets using the same tag-name-derived pattern as every built-in
+        fill-in element — see that function's docstring for why this is safe to
+        do generically, without any course-specific knowledge in `pl2docx` itself.
+    """
+    return [tag for tag, cls in element_config.behavior_class.items() if cls == "fill-in"]

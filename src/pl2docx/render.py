@@ -18,16 +18,20 @@ from pathlib import Path
 
 from pl2docx.config import load_config
 from pl2docx.docx_builder import ZoneQuestions, render_document
-from pl2docx.element_config import ElementConfig, load_element_config
+from pl2docx.element_config import ElementConfig, additional_fill_in_tags, load_element_config
 from pl2docx.html_parser import ParsedQuestion, parse_instance_question_html
 
 
-def _load_question(html_dir: Path, instance_question_id: int) -> ParsedQuestion:
+def _load_question(
+    html_dir: Path, instance_question_id: int, extra_fill_in_tags: list[str]
+) -> ParsedQuestion:
     html = (html_dir / f"{instance_question_id}.html").read_text(encoding="utf-8")
-    return parse_instance_question_html(html)
+    return parse_instance_question_html(html, additional_fill_in_tags=extra_fill_in_tags)
 
 
-def _build_zones(html_dir: Path, structure: list[dict]) -> list[ZoneQuestions]:
+def _build_zones(
+    html_dir: Path, structure: list[dict], element_config: ElementConfig | None
+) -> list[ZoneQuestions]:
     """Pair each zone's questions with their document-wide 1-based number.
 
     Numbering is continuous across the whole document (not restarted per
@@ -35,12 +39,13 @@ def _build_zones(html_dir: Path, structure: list[dict]) -> list[ZoneQuestions]:
     and the simplest behavior consistent with this phase's scope. Per-zone
     restart is a plausible future config option, not implemented here.
     """
+    extra_fill_in_tags = additional_fill_in_tags(element_config) if element_config else []
     zones: list[ZoneQuestions] = []
     number = 1
     for zone in structure:
         questions: list[tuple[ParsedQuestion, int]] = []
         for iq_id in zone["instance_question_ids"]:
-            questions.append((_load_question(html_dir, iq_id), number))
+            questions.append((_load_question(html_dir, iq_id, extra_fill_in_tags), number))
             number += 1
         zones.append({"title": zone["title"], "questions": questions})
     return zones
@@ -80,14 +85,14 @@ def render_instance(
 
     render_document(
         template_path,
-        _build_zones(instance_dir / "blank", structure),
+        _build_zones(instance_dir / "blank", structure, element_config),
         is_answer_key=False,
         output_path=blank_path,
         element_config=element_config,
     )
     render_document(
         template_path,
-        _build_zones(instance_dir / "key", structure),
+        _build_zones(instance_dir / "key", structure, element_config),
         is_answer_key=True,
         output_path=key_path,
         element_config=element_config,

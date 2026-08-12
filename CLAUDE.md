@@ -68,8 +68,21 @@ Current structure:
 │   │                               #   also downloads same-origin <img>s into files/ next to each
 │   │                               #   instance_question's HTML, rewriting src to the local path,
 │   │                               #   and writes structure.json (zone titles + question order/ids)
-│   ├── html_parser.py             # parse_instance_question_html() -> ParsedQuestion; supports
-│   │                               #   pl-multiple-choice/checkbox/string-input/integer-input only.
+│   ├── html_parser.py             # parse_instance_question_html() -> ParsedQuestion; built-in
+│   │                               #   support: pl-multiple-choice, pl-checkbox, and 5 fill-in-type
+│   │                               #   elements sharing one markup pattern (pl-string-input,
+│   │                               #   pl-integer-input, pl-number-input, pl-symbolic-input,
+│   │                               #   pl-units-input - _add_fill_in_groups() detects any of these
+│   │                               #   generically from its tag name alone). An
+│   │                               #   additional_fill_in_tags param extends detection to
+│   │                               #   instructor-configured, non-built-in fill-in elements (e.g.
+│   │                               #   course-specific pl-scinum-input) via the identical
+│   │                               #   tag-name-derived mechanism - see element_config.py's
+│   │                               #   additional_fill_in_tags() for how config.yaml's
+│   │                               #   additional-elements feeds this. pl-big-o-input was checked
+│   │                               #   and deliberately NOT supported: its <input> class omits the
+│   │                               #   "pl-" prefix every other fill-in element uses, breaking the
+│   │                               #   tag-name-derived pattern this mechanism depends on.
 │   │                               #   ParsedQuestion.widgets: list[Widget], one per distinct named
 │   │                               #   input group in source (DOM) order - compound (multi-widget)
 │   │                               #   questions are supported (Phase 3B), not rejected.
@@ -400,6 +413,13 @@ def hund_violations(system: OrbitalSystem) -> list[EnergyLevel]:
   instead of separate `display`/`format` options; widgets render inline at their real
   source position rather than appended after the whole prompt; and `draw-border` draws
   one box around a widget's *entire* rendered content, not one box per option.
+- **Fill-in-type element scope (2026-08-12)**: originally just `pl-string-input`/
+  `pl-integer-input`; extended the same day to `pl-number-input`/`pl-symbolic-input`/
+  `pl-units-input` (built-in — confirmed core PL elements sharing the exact same markup
+  pattern) plus a generic `additional-elements` detection pathway for non-built-in
+  fill-in elements following that same convention (e.g. `pl-scinum-input`, course-
+  specific). `pl-big-o-input` was checked and explicitly deferred (irregular class
+  name breaks the pattern) — see `html_parser.py`'s repo-structure entry above.
 - **Rich HTML → docx conversion and image embedding** (Phase 4, reframed from "Math
   rendering" — same underlying "walk the HTML and convert it properly" work): paragraphs/
   bold/italic/underline, currently flattened to plain text by `html_parser.py`'s

@@ -187,6 +187,135 @@ def test_fill_in_label_and_suffix_extracted():
     assert widget.suffix == "units"
 
 
+def test_number_input_detected():
+    """pl-number-input is a core PL element sharing string/integer-input's exact
+    markup pattern - confirmed against pl-number-input.mustache."""
+    html = """
+    <div class="question-block">
+      <div class="card-header"><h1>Number input</h1></div>
+      <div class="card-body question-body">
+        <span class="input-group pl-number-input">
+          <span class="input-group-text">x =</span>
+          <input class="form-control pl-number-input-input" name="answer" type="text">
+          <span class="input-group-text">m/s</span>
+        </span>
+      </div>
+    </div>
+    """
+    q = parse_instance_question_html(html)
+    widget = q.widgets[0]
+    assert widget.kind == "number_input"
+    assert widget.label == "x ="
+    assert widget.suffix == "m/s"
+
+
+def test_units_input_detected():
+    """pl-units-input is a core PL element sharing the same markup pattern -
+    confirmed against pl-units-input.mustache."""
+    html = """
+    <div class="question-block">
+      <div class="card-header"><h1>Units input</h1></div>
+      <div class="card-body question-body">
+        <span class="input-group pl-units-input">
+          <input class="form-control pl-units-input-input" name="speed" type="text">
+        </span>
+      </div>
+    </div>
+    """
+    q = parse_instance_question_html(html)
+    assert q.widgets[0].kind == "units_input"
+
+
+def test_symbolic_input_plain_mode_detected():
+    """pl-symbolic-input's non-formula-editor branch is a plain <input> following
+    the shared pattern - confirmed against pl-symbolic-input.mustache."""
+    html = """
+    <div class="question-block">
+      <div class="card-header"><h1>Symbolic input</h1></div>
+      <div class="card-body question-body">
+        <span class="input-group pl-symbolic-input">
+          <input class="form-control pl-symbolic-input-input" name="expr" type="text">
+        </span>
+      </div>
+    </div>
+    """
+    q = parse_instance_question_html(html)
+    assert q.widgets[0].kind == "symbolic_input"
+
+
+def test_symbolic_input_formula_editor_mode_not_detected():
+    """Regression: pl-symbolic-input's formula_editor mode renders a JS-populated
+    <math-field> custom element (carrying the pl-symbolic-input-input class, but a
+    different tag name) alongside hidden <input>s that actually carry the name -
+    confirmed against pl-symbolic-input.mustache. Restricting detection to real
+    <input>/<textarea> tags must exclude the <math-field>, so a page with only this
+    markup should fail to detect any widget (UnsupportedElementError), not silently
+    produce an empty/unusable one."""
+    html = """
+    <div class="question-block">
+      <div class="card-header"><h1>Formula editor</h1></div>
+      <div class="card-body question-body">
+        <span class="input-group pl-symbolic-input">
+          <input type="hidden" name="expr">
+          <input type="hidden" name="expr-latex">
+          <math-field class="form-control pl-symbolic-input-input"></math-field>
+        </span>
+      </div>
+    </div>
+    """
+    with pytest.raises(UnsupportedElementError):
+        parse_instance_question_html(html)
+
+
+def test_additional_fill_in_tag_not_detected_without_opt_in():
+    """A fill-in-type element that isn't built-in must not be detected unless its
+    tag is explicitly passed in additional_fill_in_tags - confirms the mechanism
+    is genuinely opt-in, not accidentally always-on."""
+    html = """
+    <div class="question-block">
+      <div class="card-header"><h1>Scinum</h1></div>
+      <div class="card-body question-body">
+        <span class="input-group pl-scinum-input">
+          <input class="form-control pl-scinum-input-input" name="first" type="text">
+        </span>
+      </div>
+    </div>
+    """
+    with pytest.raises(UnsupportedElementError):
+        parse_instance_question_html(html)
+
+
+def test_additional_fill_in_tag_compound_question():
+    """Modeled on the real course-repo TEST/pl-scinum-input question (a course-
+    specific element, not core PL), which has 7 separate named pl-scinum-input
+    widgets on one page - exercises both the generic additional-elements
+    detection pathway and compound-question grouping together, matching the
+    real content this is meant to support."""
+    html = """
+    <div class="question-block">
+      <div class="card-header"><h1>TEST/pl-scinum-input</h1></div>
+      <div class="card-body question-body">
+        <p>Part A:</p>
+        <span class="input-group pl-scinum-input">
+          <span class="input-group-text">98.0:</span>
+          <input class="form-control pl-scinum-input-input" name="first" type="text">
+        </span>
+        <p>Part B:</p>
+        <span class="input-group pl-scinum-input">
+          <span class="input-group-text">N_A:</span>
+          <input class="form-control pl-scinum-input-input" name="second" type="text">
+        </span>
+      </div>
+    </div>
+    """
+    q = parse_instance_question_html(html, additional_fill_in_tags=["pl-scinum-input"])
+    assert [w.kind for w in q.widgets] == ["pl-scinum-input", "pl-scinum-input"]
+    assert [w.name for w in q.widgets] == ["first", "second"]
+    assert q.widgets[0].label == "98.0:"
+    assert q.widgets[1].label == "N_A:"
+    assert q.prompt_segments == ["Part A:", "Part B:", ""]
+
+
 def test_checkbox_help_text_and_hidden_legend_stripped():
     """Regression: pl-checkbox injects a `<small class="form-text text-muted">`
     (Python-generated, e.g. "Select all possible options that apply.") and a

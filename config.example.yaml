@@ -37,7 +37,9 @@ template_path: "template.docx"
 
 # Phase 3B: per-element formatting preferences (all keys optional; omitting this
 # section entirely applies built-in defaults for every widget kind). See
-# pl2docx.element_config for the full field reference.
+# pl2docx.element_config for the full field reference. Built-in fill-in-type
+# elements (auto-detected, no config needed for basic support): pl-string-input,
+# pl-integer-input, pl-number-input, pl-symbolic-input, pl-units-input.
 #
 # global-element-preferences:
 #   pl-multiple-choice:
@@ -57,7 +59,11 @@ template_path: "template.docx"
 #     display: null
 #     draw-border: false
 #
-# additional-elements:
+# additional-elements: elements not built into pl2docx (typically course-specific,
+# e.g. this one lives only in the chem 0110 course repo) that still follow the same
+# fill-in markup convention as the built-ins above (an .input-group-wrapped
+# <input>/<textarea> carrying a "pl-<element>-input" class) - detected generically
+# from the tag name alone, with no course-specific code in pl2docx itself.
 #   pl-scinum-input:
 #     type: fill-in              # selector | fill-in - which built-in behavior set to extend
 #     display: null

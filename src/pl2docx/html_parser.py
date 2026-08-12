@@ -24,37 +24,80 @@ against real fetched HTML during Phase 1, not guessed:
   (Homework-type assessments) or `"Available points:"` (Exam-type) holds the
   question's worth — not to be confused with the table's always-present
   `"Total points:"` row, which is the student's current score.
-- Element-specific input markup (``pl-multiple-choice``, ``pl-checkbox``,
-  ``pl-string-input``, ``pl-integer-input``) is documented inline below, from
-  each element's own ``.py``/``.mustache`` source. ``form-check-inline`` (on
-  a `.form-check`) signals PL's own inline layout choice
-  (``pl-multiple-choice.mustache``/``pl-checkbox.mustache``); a `<select>`
-  instead of `<input type=radio>` signals a `display="dropdown"`
-  `pl-multiple-choice`; both `pl-string-input` and `pl-integer-input` wrap
-  their `<input>` in `.input-group`, with sibling `.input-group-text` spans
-  holding the element's `label`/`suffix` text
-  (``pl-string-input.mustache``/``pl-integer-input.mustache``).
+- Element-specific input markup (``pl-multiple-choice``, ``pl-checkbox``, and the
+  fill-in-type elements below) is documented inline below, from each element's own
+  ``.py``/``.mustache`` source. ``form-check-inline`` (on a `.form-check`) signals
+  PL's own inline layout choice (``pl-multiple-choice.mustache``/
+  ``pl-checkbox.mustache``); a `<select>` instead of `<input type=radio>` signals a
+  `display="dropdown"` `pl-multiple-choice`.
+- **Fill-in-type elements** (``pl-string-input``, ``pl-integer-input``,
+  ``pl-number-input``, ``pl-symbolic-input``, ``pl-units-input`` — confirmed core PL
+  elements, all sharing one markup pattern) wrap their `<input>`/`<textarea>` in a
+  container whose class starts with `input-group`, with sibling
+  `.input-group-text` spans holding the element's `label`/`suffix` text
+  (``pl-string-input.mustache`` et al.). The input itself carries a
+  `pl-{element}-input` (or `pl-{element}-multiline`, for elements offering a
+  multi-line textarea) class alongside its `name` attribute — this is exactly the
+  element's own registered tag name plus `-input`/`-multiline`, which is what lets
+  `_add_fill_in_groups` below detect any element following this convention purely
+  from its tag name string, with no element-specific code. Confirmed **not**
+  followed by every fill-in-shaped element: `pl-big-o-input`'s `<input>` carries
+  class `big-o-input-input` (missing the `pl-` prefix) — deliberately not
+  supported (built-in or via `additional-elements`) until that's worth a special
+  case. `pl-symbolic-input` additionally has a `formula_editor` rendering mode
+  whose visible widget is a JS-populated `<math-field>` custom element (a
+  different tag name, carrying the `pl-symbolic-input-input` class but not
+  `<input>`/`<textarea>`) — restricting detection to `<input>`/`<textarea>` tags
+  specifically (not just any tag with a matching class) is what correctly excludes
+  it, so a `formula_editor`-mode `pl-symbolic-input` safely falls through to
+  "unsupported" rather than being mis-detected.
 """
 
 from __future__ import annotations
 
 import re
 import string
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Literal
 
 from bs4 import BeautifulSoup, NavigableString, Tag
 
-QuestionKind = Literal["multiple_choice", "checkbox", "string_input", "integer_input"]
+#: The built-in (zero-config) widget kinds. `Widget.kind` is `str`, not this `Literal`,
+#: since an `additional-elements`-configured widget's `kind` is an arbitrary
+#: instructor-declared PL element tag name (e.g. `"pl-scinum-input"`), not a member of
+#: this closed set — this alias exists for documentation/reference, not as an
+#: exhaustive type constraint.
+QuestionKind = Literal[
+    "multiple_choice", "checkbox", "string_input", "integer_input", "number_input",
+    "symbolic_input", "units_input",
+]
+
+#: Built-in fill-in-type kinds, mapped to the PL element tag name whose markup
+#: identifies them. All share the exact same detection pattern (see
+#: `_add_fill_in_groups`) — confirmed against each element's own PL source, not
+#: guessed. `additional-elements`-configured tags (e.g. `pl-scinum-input`, a
+#: course-specific element following this same convention) use this identical
+#: mechanism but aren't listed here since they come from the caller's config, not a
+#: fixed set.
+_BUILTIN_FILL_IN_TAGS: dict[str, str] = {
+    "string_input": "pl-string-input",
+    "integer_input": "pl-integer-input",
+    "number_input": "pl-number-input",
+    "symbolic_input": "pl-symbolic-input",
+    "units_input": "pl-units-input",
+}
 
 
 class UnsupportedElementError(RuntimeError):
     """Raised when a question's element type/shape isn't one this module handles.
 
     Compound questions (more than one distinct input-widget group on a page) are
-    supported as of Phase 3B — this now only covers questions where none of the 4
-    supported element types' input markup could be recognized at all, or the page's
-    generic containers (`.question-block`/`.question-body`) couldn't be found.
+    supported as of Phase 3B — this now only covers questions where none of the
+    supported element types' input markup could be recognized at all (built-in, or
+    declared via `additional-elements` and passed in as `additional_fill_in_tags`),
+    or the page's generic containers (`.question-block`/`.question-body`) couldn't
+    be found.
     """
 
 
@@ -68,40 +111,46 @@ class Widget:
 
     Parameters
     ----------
-    kind : QuestionKind
-        Which of the 4 supported element types this widget is.
+    kind : str
+        Which element type this widget is: one of the built-in `QuestionKind`
+        values (`"multiple_choice"`/`"checkbox"`/`"string_input"`/`"integer_input"`/
+        `"number_input"`/`"symbolic_input"`/`"units_input"`), or — for a fill-in-type
+        widget matched via a caller-supplied `additional_fill_in_tags` entry — the
+        raw PL element tag name itself (e.g. `"pl-scinum-input"`), matching how
+        `pl2docx.element_config` keys `additional-elements` preferences/behavior
+        class by that same tag string.
     name : str
         The input `name` attribute shared by this widget's own input tag(s) —
         distinguishes one widget from another on the same page.
     options : list[str]
         For `multiple_choice`/`checkbox`, the answer options in on-page order.
-        Empty for `string_input`/`integer_input`.
+        Empty for every fill-in-type kind.
     correct_option_indices : list[int]
         For `multiple_choice`/`checkbox`, best-effort indices into `options` that
         `.answer-body` could be matched back to (for bolding). Always empty for
-        `string_input`/`integer_input`, and may be empty for `multiple_choice`/
+        every fill-in-type kind, and may be empty for `multiple_choice`/
         `checkbox` too even when the page has answer-key data — matching isn't
         guaranteed (see `ParsedQuestion.answer_panel_text`).
     is_inline : bool
         For `multiple_choice`/`checkbox` rendered as radio/checkbox inputs (not a
         dropdown): whether PL's own source HTML used its inline layout
-        (`form-check-inline`). Always `False` for `string_input`/`integer_input`
-        and for dropdown-rendered `multiple_choice` (no such signal exists there).
+        (`form-check-inline`). Always `False` for every fill-in-type kind and for
+        dropdown-rendered `multiple_choice` (no such signal exists there).
     is_dropdown : bool
         Whether this `multiple_choice` widget is rendered as a `<select>`
         (`display="dropdown"` in PL) rather than radio buttons. Always `False` for
         other kinds.
     label : str or None
-        For `string_input`/`integer_input`, the element's `label` text (the
+        For a fill-in-type kind, the element's `label` text (the
         `.input-group-text` immediately before the `<input>`), if present. Always
         `None` for `multiple_choice`/`checkbox`.
     suffix : str or None
-        For `string_input`/`integer_input`, the element's `suffix` text (the
+        For a fill-in-type kind, the element's `suffix` text (the
         `.input-group-text` immediately after the `<input>`), if present. Always
         `None` for `multiple_choice`/`checkbox`.
     """
 
-    kind: QuestionKind
+    kind: str
     name: str
     options: list[str] = field(default_factory=list)
     correct_option_indices: list[int] = field(default_factory=list)
@@ -174,7 +223,9 @@ class ParsedQuestion:
     qid: str | None
 
 
-def parse_instance_question_html(html: str) -> ParsedQuestion:
+def parse_instance_question_html(
+    html: str, additional_fill_in_tags: Iterable[str] = ()
+) -> ParsedQuestion:
     """Parse one fetched `instance_question` page into a `ParsedQuestion`.
 
     Parameters
@@ -184,6 +235,15 @@ def parse_instance_question_html(html: str) -> ParsedQuestion:
         `pl2docx.pl_client.PLClient.fetch_instance_questions`. May be either
         the blank (open-instance) or answer-key (closed-instance) render of
         the same variant.
+    additional_fill_in_tags : Iterable[str]
+        PL element tag names (e.g. `"pl-scinum-input"`) to additionally detect
+        as fill-in-type widgets, beyond the built-in set — typically the
+        instructor's `additional-elements` config entries whose declared
+        `type` is `fill-in` (see `pl2docx.element_config.additional_fill_in_tags`).
+        Detected using the exact same tag-name-derived pattern as every built-in
+        fill-in element (see this module's docstring); an element not actually
+        following that markup convention (e.g. `pl-big-o-input`) simply won't be
+        detected, not a hard error.
 
     Returns
     -------
@@ -193,8 +253,8 @@ def parse_instance_question_html(html: str) -> ParsedQuestion:
     ------
     UnsupportedElementError
         If the question's generic containers can't be found, or if none of
-        the 4 supported element types' input markup is recognized anywhere
-        on the page.
+        the supported element types' input markup is recognized anywhere on
+        the page.
     """
     soup = BeautifulSoup(html, "html.parser")
 
@@ -215,15 +275,17 @@ def parse_instance_question_html(html: str) -> ParsedQuestion:
     points_numeric = _parse_points_numeric(points)
     qid = _extract_qid(soup)
 
-    groups = _find_widget_groups(question_body)
+    groups = _find_widget_groups(question_body, additional_fill_in_tags)
     if not groups:
         raise UnsupportedElementError(
             "No supported input widget (pl-multiple-choice/pl-checkbox/"
-            "pl-string-input/pl-integer-input) found in page HTML."
+            + "/".join(_BUILTIN_FILL_IN_TAGS.values())
+            + (f"/{'/'.join(additional_fill_in_tags)}" if additional_fill_in_tags else "")
+            + ") found in page HTML."
         )
 
     widgets = [_build_widget(group, answer_body) for group in groups]
-    prompt_segments = _extract_prompt_segments(question_body, groups)
+    prompt_segments = _extract_prompt_segments(question_body, groups, additional_fill_in_tags)
 
     return ParsedQuestion(
         title=title,
@@ -275,13 +337,15 @@ def _strip_help_text(question_body: Tag) -> None:
 class _WidgetGroup:
     """Internal: one widget's raw containers, before building its `Widget`."""
 
-    kind: QuestionKind
+    kind: str
     name: str
     containers: list[Tag]  # DOM-order containers to strip/replace for prompt-splitting
     is_dropdown: bool = False
 
 
-def _find_widget_groups(question_body: Tag) -> list[_WidgetGroup]:
+def _find_widget_groups(
+    question_body: Tag, additional_fill_in_tags: Iterable[str] = ()
+) -> list[_WidgetGroup]:
     """Group this page's recognized inputs into one `_WidgetGroup` per (kind, name).
 
     Groups are returned in true DOM order of first appearance — determined via
@@ -311,13 +375,10 @@ def _find_widget_groups(question_body: Tag) -> list[_WidgetGroup]:
         )
         add("multiple_choice", select.get("name", ""), container, is_dropdown=True)
 
-    for string_input in question_body.find_all(class_=re.compile(r"pl-string-input-(input|multiline)")):
-        container = string_input.find_parent(class_=re.compile(r"^input-group\b")) or string_input
-        add("string_input", string_input.get("name", ""), container)
-
-    for integer_input in question_body.find_all(class_="pl-integer-input-input"):
-        container = integer_input.find_parent(class_=re.compile(r"^input-group\b")) or integer_input
-        add("integer_input", integer_input.get("name", ""), container)
+    for kind, tag in _BUILTIN_FILL_IN_TAGS.items():
+        _add_fill_in_groups(question_body, tag, kind, add)
+    for tag in additional_fill_in_tags:
+        _add_fill_in_groups(question_body, tag, tag, add)
 
     order_index = {id(tag): i for i, tag in enumerate(question_body.descendants) if isinstance(tag, Tag)}
     ordered_keys = sorted(
@@ -325,6 +386,30 @@ def _find_widget_groups(question_body: Tag) -> list[_WidgetGroup]:
         key=lambda key: order_index.get(id(groups[key].containers[0]), len(order_index)),
     )
     return [groups[key] for key in ordered_keys]
+
+
+def _add_fill_in_groups(question_body: Tag, tag: str, kind: str, add) -> None:
+    """Detect one fill-in-type element's widgets by its tag-name-derived class pattern.
+
+    Confirmed shared convention across every built-in fill-in element (and
+    `pl-scinum-input`, a course-specific `additional-elements` element following
+    the same pattern): the input's own class is `{tag}-input` or `{tag}-multiline`
+    (the element's registered PL tag name, verbatim, plus a fixed suffix) — so this
+    needs no per-element knowledge beyond the tag name string itself, which is
+    exactly what lets `additional_fill_in_tags` support arbitrary configured
+    elements without any course-specific string appearing in this module.
+
+    Restricting the search to `<input>`/`<textarea>` tag names specifically (not
+    just any tag carrying a matching class) is deliberate, not incidental: it's
+    what correctly excludes `pl-symbolic-input`'s `formula_editor`-mode
+    `<math-field>` custom element, which carries the same
+    `pl-symbolic-input-input` class but isn't a real, statically-populated input —
+    see this module's docstring.
+    """
+    pattern = re.compile(rf"^{re.escape(tag)}-(input|multiline)$")
+    for input_tag in question_body.find_all(["input", "textarea"], class_=pattern):
+        container = input_tag.find_parent(class_=re.compile(r"^input-group\b")) or input_tag
+        add(kind, input_tag.get("name", ""), container)
 
 
 def _build_widget(group: _WidgetGroup, answer_body: Tag | None) -> Widget:
@@ -418,23 +503,26 @@ def _extract_correct_option_indices(answer_body: Tag | None, options: list[str])
     return indices
 
 
-def _extract_prompt_segments(question_body: Tag, groups: list[_WidgetGroup]) -> list[str]:
+def _extract_prompt_segments(
+    question_body: Tag, groups: list[_WidgetGroup], additional_fill_in_tags: Iterable[str] = ()
+) -> list[str]:
     """Split the prompt's flattened text at each widget's source position.
 
     Re-runs widget detection on a fresh copy of `question_body` (rather than
     mutating the tree used for the rest of parsing) so this can safely replace
     each widget's first container with a placeholder and remove the rest, then
     split the resulting flattened text on those placeholders. Detection is a pure
-    function of the HTML, so `_find_widget_groups` on the copy produces groups in
-    the same order/count as `groups` — this is an internal invariant of this
-    module, not something calling code needs to reason about.
+    function of the HTML (given the same `additional_fill_in_tags`), so
+    `_find_widget_groups` on the copy produces groups in the same order/count as
+    `groups` — this is an internal invariant of this module, not something calling
+    code needs to reason about.
     """
     if not groups:
         text = question_body.get_text(separator=" ", strip=False)
         return [re.sub(r"\s+", " ", text).strip()]
 
     body_copy = BeautifulSoup(str(question_body), "html.parser")
-    copy_groups = _find_widget_groups(body_copy)
+    copy_groups = _find_widget_groups(body_copy, additional_fill_in_tags)
 
     marker = "\x00"
     for copy_group in copy_groups:

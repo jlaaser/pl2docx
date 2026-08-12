@@ -151,6 +151,33 @@ def test_fill_in_none_display_generated_then_discarded(starter_template):
     assert _text(ctx["answer_element"]).strip() == ""
 
 
+def test_additional_element_fill_in_renders_end_to_end(starter_template):
+    """A widget of a non-built-in kind (as produced for an additional-elements
+    tag, e.g. pl-scinum-input) must render exactly like any other fill-in
+    widget - build_question_context/element_renderer are kind-agnostic beyond
+    the built-in selector-kind check."""
+    tpl = _tpl(starter_template)
+    widget = Widget(kind="pl-scinum-input", name="first", label="98.0:")
+    question = ParsedQuestion(
+        title="Q",
+        prompt_segments=["Part A:", ""],
+        widgets=[widget],
+        answer_panel_text=None,
+        points="1",
+        points_numeric=1.0,
+        qid="q/3",
+    )
+    element_config = ElementConfig(
+        preferences={"pl-scinum-input": FillInPreferences(draw_border=True)},
+        behavior_class={"pl-scinum-input": "fill-in"},
+    )
+    ctx = build_question_context(tpl, question, 1, element_config)
+    text = _text(ctx["question_contents"])
+    assert "98.0:" in text
+    assert "Answer:" not in text
+    assert _has_run_border(ctx["question_contents"])
+
+
 def test_widgets_render_at_source_position():
     """Regression: widget content must appear between its own prompt segments,
     not be appended after the whole prompt."""
