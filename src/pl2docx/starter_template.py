@@ -68,6 +68,11 @@ def build_starter_template(output_path: Path = DEFAULT_OUTPUT_PATH) -> None:
     doc.add_paragraph(" [{{ question.qid }}]", style="pl2docx QID Reference")
     doc.add_paragraph("{%- endif %}")
     doc.add_paragraph("{{p question.question_contents }}")
+    doc.add_paragraph(
+        "The paragraph below is only populated when an element's config.yaml "
+        "display preference is set to template - move or restyle it freely."
+    )
+    doc.add_paragraph("{{p question.answer_element }}")
     doc.add_paragraph("{% if is_answer_key %}")
     _add_bordered_solution_box(doc)
     doc.add_paragraph("{% else %}")

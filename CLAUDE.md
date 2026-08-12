@@ -64,26 +64,44 @@ Current structure:
 │   │                               #   instance_question's HTML, rewriting src to the local path,
 │   │                               #   and writes structure.json (zone titles + question order/ids)
 │   ├── html_parser.py             # parse_instance_question_html() -> ParsedQuestion; supports
-│   │                               #   pl-multiple-choice/checkbox/string-input/integer-input only
-│   │                               #   (Phase 2/3) - raises UnsupportedElementError for anything
-│   │                               #   else or compound multi-widget questions (Phase 3B territory);
-│   │                               #   also extracts qid (Staff info panel) and points_numeric
-│   ├── element_renderer.py        # build_question_context() - one ParsedQuestion -> the 3 Subdocs
-│   │                               #   (question_contents/answer_contents/answer_space) + qid/points
-│   │                               #   a question's Jinja context needs. Phase 3A: fixed formatting
-│   │                               #   (Phase 2-equivalent); Phase 3B adds config-driven list-style/
-│   │                               #   display/fill-in-format choices and compound-widget support.
+│   │                               #   pl-multiple-choice/checkbox/string-input/integer-input only.
+│   │                               #   ParsedQuestion.widgets: list[Widget], one per distinct named
+│   │                               #   input group in source (DOM) order - compound (multi-widget)
+│   │                               #   questions are supported (Phase 3B), not rejected.
+│   │                               #   ParsedQuestion.prompt_segments is aligned 1:1 around widgets
+│   │                               #   (len(widgets)+1) so callers can interleave rendered widget
+│   │                               #   content at its real source position. UnsupportedElementError
+│   │                               #   now only covers zero recognized widgets found on the page.
+│   │                               #   Also extracts qid (Staff info panel) and points_numeric.
+│   ├── element_config.py          # Phase 3B: SelectorPreferences/FillInPreferences/ElementConfig
+│   │                               #   dataclasses + load_element_config()/resolve_preferences() -
+│   │                               #   loads config.yaml's global-element-preferences/
+│   │                               #   additional-elements sections; all keys optional, built-in
+│   │                               #   defaults apply when absent
+│   ├── element_renderer.py        # build_question_context() - one ParsedQuestion + ElementConfig ->
+│   │                               #   the 4 Subdocs (question_contents/answer_contents/answer_space/
+│   │                               #   answer_element) + qid/points a question's Jinja context needs.
+│   │                               #   Phase 3B: widgets render at their real source position
+│   │                               #   (interleaved with prompt_segments, not appended after);
+│   │                               #   config-driven list-style/bold-correct/display/draw-border per
+│   │                               #   widget. display="template" routes a widget's block-rendered
+│   │                               #   content into answer_element instead of question_contents.
 │   ├── docx_builder.py            # render_document() - assembles the zones/questions context and
 │   │                               #   calls docxtpl render/save; does NO per-element formatting
 │   │                               #   itself (see element_renderer.py) - document *layout* lives in
-│   │                               #   the instructor's template (loop tags + named styles), not here
+│   │                               #   the instructor's template (loop tags + named styles), not here.
+│   │                               #   Takes an optional ElementConfig, threaded to
+│   │                               #   build_question_context per question.
 │   ├── starter_template.py        # build_starter_template() - CLI (`pl2docx-starter-template`)
 │   │                               #   generates an editable example instructor template (zones/
-│   │                               #   questions loop + named "pl2docx ..." styles), via python-docx
-│   │                               #   (not committed as a binary - same reasoning as test fixtures)
+│   │                               #   questions loop + named "pl2docx ..." styles + an
+│   │                               #   {{p question.answer_element }} tag), via python-docx (not
+│   │                               #   committed as a binary - same reasoning as test fixtures)
 │   └── render.py                  # CLI entry point (python -m pl2docx.render / `pl2docx-render`) -
 │                                   #   renders one fetch.py output/<instance>/ dir (using its
-│                                   #   structure.json for zone/question order) into blank+key docx
+│                                   #   structure.json for zone/question order) into blank+key docx;
+│                                   #   loads element_config.yaml's preferences via
+│                                   #   element_config.load_element_config() alongside config.py
 ├── tests/
 │   ├── conftest.py                          # starter_template fixture (generated at test time,
 │   │                                         #   via the real build_starter_template())
@@ -91,6 +109,8 @@ Current structure:
 │   │                                         #   one blank+key pair per Phase 2 element kind
 │   ├── test_csrf.py                         # unit tests, no live server needed
 │   ├── test_html_parser.py                  # unit tests, no live server needed
+│   ├── test_element_config.py               # unit tests, no live server needed
+│   ├── test_element_renderer.py             # unit tests, no live server needed
 │   ├── test_docx_builder.py                 # unit tests, no live server needed
 │   ├── test_starter_template.py             # unit tests, no live server needed
 │   ├── test_pl_client.py                    # unit tests for parse_zone_groups(), no live server needed
@@ -154,6 +174,30 @@ Current structure:
   `PackageNotFoundError` deep inside `docxtpl`'s subdoc creation. `docx_builder.py` now
   catches this and re-raises as `TemplateUnreadableError` with an actionable message —
   close the file in Word and let syncing finish, then retry.
+- **A run-level character border (`<w:bdr>` inside a run's `<w:rPr>`) is a separate,
+  simpler technique from the table-cell-border technique above** — confirmed working
+  this session (Phase 3B, `element_renderer.py`'s `_add_run_border()`), for a different
+  problem: boxing one *widget's* rendered content (built directly in Python, not a
+  `{{p ... }}` template tag) with a box tight to the text, sitting inline with
+  surrounding content, matching a PL-style "boxed multiple-choice option" look. Since it
+  lives inside the run itself rather than the run's containing paragraph, it isn't
+  affected by the paragraph-replacement mechanism at all (that only discards the
+  *paragraph* container a `{{p ... }}` tag sits in) — apply it directly to
+  `docx.text.run.Run` objects built by `element_renderer.py` immediately after adding
+  their text. Word visually merges adjacent runs sharing identical border formatting into
+  one continuous box, so applying it to every run of a widget's inline content (including
+  inter-option spacer runs) yields a single box around the whole widget rather than one
+  box per run.
+  - **Do not fall back to the table-cell-border technique for multi-paragraph widget
+    content** (e.g. `display: block`, one selector option per line) — tried and rejected
+    by the user: a table cell always spans the full page width, producing a box far
+    wider than the boxed text, unlike the table-cell technique's *intended* use above
+    (wrapping a whole `{{p ... }}` subdoc's content, where full-width is fine/expected).
+    `draw-border` always uses the run-level border, regardless of `display` — for
+    `block`/`template` content this means one tight box per line (one per paragraph,
+    since a run border can't merge across a paragraph break) rather than one box around
+    the whole multi-line block; that's the accepted, correct behavior here, not a
+    limitation to work around.
 
 Update this repository structure description as needed when significant changes are made to the folder structure or organization of files.
 
@@ -205,25 +249,31 @@ Update this repository structure description as needed when significant changes 
    session's spike (throwaway, confirmed: per-iteration subdocs in a `{% for %}` loop
    don't cross-contaminate; named styles defined in the template are correctly picked
    up by Python-built subdoc content).
-   - `element_renderer.py` builds each question's 3 subdocs
-     (`question_contents`/`answer_contents`/`answer_space`) plus its `qid`/
-     `points_numeric`/`points_text`. **Phase 3A status**: fixed formatting, equivalent
-     in substance to Phase 2's old behavior. **Phase 3B** (not yet implemented) adds
-     `config.yaml`-driven per-element-type formatting (list style: letter-labels/
-     bubble/checkbox; block vs. inline; bold-correct; fill-in blank format) and
-     best-effort compound-multi-widget-question support.
+   - `element_renderer.py` builds each question's 4 subdocs
+     (`question_contents`/`answer_contents`/`answer_space`/`answer_element`) plus its
+     `qid`/`points_numeric`/`points_text`. **Phase 3B status (done)**:
+     `config.yaml`-driven per-widget formatting via `element_config.py` — list style
+     (letter-labels/bubble/checkbox), bold-correct, `display`
+     (`inline`/`block`/`template`/`none`, shared vocabulary for selector- and
+     fill-in-type widgets), and `draw-border` (a tight, text-width box around a widget's
+     rendered content, via a run-level character border, applied the same way regardless
+     of `display` — one continuous box for `inline` content, one box per line for
+     `block`/`template` content; see the docxtpl gotchas list above for why a table-cell
+     border was tried and rejected here). Widgets render at their real source position,
+     interleaved with `ParsedQuestion.prompt_segments`, not appended after the prompt.
+     Compound (multi-widget) questions are supported: each widget renders independently,
+     in source order. `html_parser.py` also strips PL's own non-visible/auxiliary markup
+     (`text-muted` help text, `visually-hidden` accessibility legends) before extracting
+     prompt text, so it doesn't leak into the rendered question (see `_strip_help_text`).
    - `docx_builder.py`'s `render_document()` assembles the `zones` context and calls
-     `docxtpl`'s render/save — no per-element formatting decisions of its own.
+     `docxtpl`'s render/save — no per-element formatting decisions of its own. Takes an
+     optional `ElementConfig`, threaded to `build_question_context` per question.
    - `starter_template.py` generates an example instructor template exercising the
-     full context shape (zone titles, question number/title/points/qid, the three
-     subdoc insertions, an `is_answer_key` branch) with named "pl2docx ..." styles
-     ready to restyle in Word.
+     full context shape (zone titles, question number/title/points/qid, the four
+     subdoc insertions including `answer_element`, an `is_answer_key` branch) with
+     named "pl2docx ..." styles ready to restyle in Word.
    - Math/rich-HTML prompt formatting and image embedding remain Phase 4 (raw LaTeX
      and dropped images are still visible in current output — known, not a bug).
-   - Compound questions (multiple input widgets on one page, e.g.
-     `physical-or-chemical`'s 3 dropdown sub-statements, `previous-experience`'s radio
-     group + text box) still raise `UnsupportedElementError` — Phase 3B's scope, not
-     yet implemented.
 
 ## Extensibility
 
@@ -301,19 +351,25 @@ def hund_violations(system: OrbitalSystem) -> list[EnergyLevel]:
 - Repo name / license / packaging.
 - **Compound questions with multiple named input widgets on one page** (confirmed real
   content: `physical-or-chemical`'s 3 separate `pl-multiple-choice` dropdown
-  sub-statements; `previous-experience`'s radio group + text box). Currently rejected by
-  `html_parser.py` (`UnsupportedElementError`) rather than mis-rendered. **Revised
-  2026-08-12**: no longer deferred — in scope for Phase 3B, best-effort (render each
-  widget inline within the question; address specific fragility if/when it surfaces).
-  Full spec: `planning_notes/2026-08-12 phase 3a implementation and phase 3b spec.md`.
+  sub-statements; `previous-experience`'s radio group + text box). **Done as of Phase 3B**
+  (2026-08-12) — `html_parser.py`'s `ParsedQuestion.widgets` holds one `Widget` per
+  named group, in source order; each is rendered independently at its own source
+  position (see Architecture item 5 / `element_renderer.py`), best-effort per the
+  original spec (address specific fragility if/when it surfaces, not preemptively).
 - **Document-structure-level formatting configuration**: **done as of Phase 3A**
   (2026-08-12) — question number/title/points/qid and zone titles are all exposed to
   the instructor's template; see Architecture item 5.
-- **Element/question-level formatting configuration (Phase 3B)**: not yet implemented.
-  Full user-provided specification (config.yaml schema, per-list-style/display/fill-in
-  options, defaults) preserved in
-  `planning_notes/2026-08-12 phase 3a implementation and phase 3b spec.md` — read that
-  before starting Phase 3B rather than re-deriving requirements.
+- **Element/question-level formatting configuration (Phase 3B)**: **done as of Phase 3B**
+  (2026-08-12) — `config.yaml`'s `global-element-preferences`/`additional-elements`
+  sections, resolved via `pl2docx.element_config`, drive per-widget list-style/
+  bold-correct/display/draw-border formatting in `element_renderer.py`. Diverged from
+  the original spec in `planning_notes/2026-08-12 phase 3a implementation and phase 3b
+  spec.md` in three ways (captured there in the Phase 3B section, and in the
+  implementation itself): a single `display` vocabulary
+  (`inline`/`block`/`template`/`none`) shared by selector- and fill-in-type widgets
+  instead of separate `display`/`format` options; widgets render inline at their real
+  source position rather than appended after the whole prompt; and `draw-border` draws
+  one box around a widget's *entire* rendered content, not one box per option.
 - **Rich HTML → docx conversion and image embedding** (Phase 4, reframed from "Math
   rendering" — same underlying "walk the HTML and convert it properly" work): paragraphs/
   bold/italic/underline, currently flattened to plain text by `html_parser.py`'s

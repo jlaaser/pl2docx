@@ -1,0 +1,231 @@
+"""Load and resolve Phase 3B's element/question-level formatting preferences.
+
+`config.yaml` may declare a `global-element-preferences` section keyed by PL element
+tag name (`pl-multiple-choice`, `pl-checkbox`, `pl-string-input`, `pl-integer-input`)
+plus an `additional-elements` section for element kinds not natively supported by
+`pl2docx.html_parser` yet, each declaring which built-in behavior class (`selector` or
+`fill-in`) it extends. All keys are optional; an absent or partial section reproduces
+Phase 3A's fixed formatting as closely as the unified `display` vocabulary below allows.
+
+Kept intentionally simple (a single global config, resolved by widget `kind` only) per
+`planning_notes/2026-08-12 phase 3a implementation and phase 3b spec.md`'s explicit
+scope note: this leaves room for a future per-question/per-zone override (e.g.
+`resolve_preferences` gaining an optional question/zone argument) without requiring a
+rewrite, but that override capability isn't built now.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal
+
+import yaml
+
+Display = Literal["inline", "block", "template", "none"]
+ListStyle = Literal["letter-labels", "bubble", "checkbox"]
+BehaviorClass = Literal["selector", "fill-in"]
+
+# Internal `pl2docx.html_parser.QuestionKind` values, keyed by the PL element tag name
+# used in config.yaml.
+_BUILTIN_KIND_BY_TAG: dict[str, str] = {
+    "pl-multiple-choice": "multiple_choice",
+    "pl-checkbox": "checkbox",
+    "pl-string-input": "string_input",
+    "pl-integer-input": "integer_input",
+}
+_BUILTIN_BEHAVIOR_CLASS: dict[str, BehaviorClass] = {
+    "multiple_choice": "selector",
+    "checkbox": "selector",
+    "string_input": "fill-in",
+    "integer_input": "fill-in",
+}
+_DEFAULT_LIST_STYLE_BY_KIND: dict[str, ListStyle] = {
+    "multiple_choice": "bubble",
+    "checkbox": "checkbox",
+}
+
+
+@dataclass(frozen=True)
+class SelectorPreferences:
+    """Formatting preferences for a selector-type widget (`pl-multiple-choice`/`pl-checkbox`).
+
+    Parameters
+    ----------
+    list_style : {"letter-labels", "bubble", "checkbox"}
+        Marker style shown before each option. Element-specific default when the
+        instructor doesn't set this: `"bubble"` for `pl-multiple-choice`, `"checkbox"`
+        for `pl-checkbox` (or any `additional-elements` entry extending `selector`,
+        which falls back to `"bubble"`).
+    bold_correct : bool
+        Whether to bold the correct option's run in the answer-key render, when it
+        could be matched back to `ParsedQuestion.Widget.correct_option_indices`.
+    display : {"inline", "block", "template", "none"} or None
+        Where/how this widget's rendered content is placed. `None` means "try to
+        auto-detect from the source HTML" (the `form-check-inline` signal); if no
+        signal is available (e.g. a dropdown-rendered `pl-multiple-choice`), falls
+        back to `"block"`. See `pl2docx.element_renderer` for how each value is
+        interpreted.
+    draw_border : bool
+        Whether to draw a single box around this widget's entire rendered content
+        (all options together).
+    """
+
+    list_style: ListStyle | None = None
+    bold_correct: bool = True
+    display: Display | None = None
+    draw_border: bool = False
+
+
+@dataclass(frozen=True)
+class FillInPreferences:
+    """Formatting preferences for a fill-in-type widget (`pl-string-input`/`pl-integer-input`).
+
+    Parameters
+    ----------
+    display : {"inline", "block", "template", "none"} or None
+        Where/how this widget's generated fill-in-the-blank content is placed. Content
+        is always generated regardless of `display` — see
+        `pl2docx.element_renderer`. `None` means "auto-detect"; no source-HTML signal
+        exists for fill-in-type widgets, so this always falls back to `"block"`.
+    draw_border : bool
+        Whether to draw a single box around this widget's label/blank/suffix content.
+    """
+
+    display: Display | None = None
+    draw_border: bool = False
+
+
+ElementPreferences = SelectorPreferences | FillInPreferences
+
+
+@dataclass(frozen=True)
+class ElementConfig:
+    """Resolved element/question-level formatting preferences for one pl2docx run.
+
+    Parameters
+    ----------
+    preferences : dict[str, ElementPreferences]
+        Explicit instructor overrides, keyed by internal `QuestionKind` string (e.g.
+        `"multiple_choice"`), already merged from `global-element-preferences` and
+        `additional-elements`. Not necessarily covering every kind
+        `pl2docx.html_parser` can produce — `resolve_preferences` falls back to
+        built-in defaults for any kind missing here.
+    behavior_class : dict[str, BehaviorClass]
+        Which preference dataclass applies to each non-built-in kind declared via
+        `additional-elements`. Built-in kinds don't need an entry (see
+        `_BUILTIN_BEHAVIOR_CLASS`).
+    """
+
+    preferences: dict[str, ElementPreferences]
+    behavior_class: dict[str, BehaviorClass]
+
+
+def load_element_config(path: str | Path) -> ElementConfig:
+    """Load Phase 3B element preferences from a `config.yaml` file.
+
+    Parameters
+    ----------
+    path : str or pathlib.Path
+        Path to a YAML config file. Only the `global-element-preferences` and
+        `additional-elements` top-level keys are read here; other keys (base URL,
+        course/assessment ids, etc.) are `pl2docx.config.load_config`'s concern.
+
+    Returns
+    -------
+    ElementConfig
+        Resolved instructor overrides. Empty (all built-in defaults apply) if
+        `path` has neither section, or doesn't exist.
+
+    Raises
+    ------
+    ValueError
+        If an `additional-elements` entry is missing its required `type` key, or
+        declares a `type` other than `"selector"`/`"fill-in"`.
+    """
+    path = Path(path)
+    if not path.exists():
+        return ElementConfig(preferences={}, behavior_class={})
+
+    with path.open("r", encoding="utf-8") as f:
+        raw = yaml.safe_load(f) or {}
+
+    behavior_class: dict[str, BehaviorClass] = {}
+    additional = raw.get("additional-elements") or {}
+    for tag, entry in additional.items():
+        entry = entry or {}
+        kind_type = entry.get("type")
+        if kind_type not in ("selector", "fill-in"):
+            raise ValueError(
+                f"additional-elements entry '{tag}' must declare type: selector|fill-in "
+                f"(got {kind_type!r})."
+            )
+        behavior_class[tag] = kind_type
+
+    preferences: dict[str, ElementPreferences] = {}
+    global_prefs = raw.get("global-element-preferences") or {}
+    for tag, entry in {**global_prefs, **additional}.items():
+        entry = {k: v for k, v in (entry or {}).items() if k != "type"}
+        kind = _BUILTIN_KIND_BY_TAG.get(tag, tag)
+        cls = _BUILTIN_BEHAVIOR_CLASS.get(kind) or behavior_class.get(tag)
+        if cls is None:
+            raise ValueError(
+                f"'{tag}' in global-element-preferences is not a built-in element and "
+                "has no matching additional-elements 'type' declaration."
+            )
+        preferences[kind] = _build_preferences(cls, entry)
+
+    return ElementConfig(preferences=preferences, behavior_class=behavior_class)
+
+
+def _build_preferences(behavior_class: BehaviorClass, entry: dict) -> ElementPreferences:
+    entry = {k.replace("-", "_"): v for k, v in entry.items()}
+    if behavior_class == "selector":
+        return SelectorPreferences(**entry)
+    return FillInPreferences(**entry)
+
+
+def resolve_preferences(element_config: ElementConfig, kind: str) -> ElementPreferences:
+    """Resolve the effective formatting preferences for one widget kind.
+
+    Parameters
+    ----------
+    element_config : ElementConfig
+        The run's loaded element configuration.
+    kind : str
+        A `pl2docx.html_parser.QuestionKind` value (or an `additional-elements` kind
+        string) identifying the widget type to resolve preferences for.
+
+    Returns
+    -------
+    SelectorPreferences or FillInPreferences
+        The instructor's explicit override for `kind` if one was configured,
+        otherwise a preferences instance built from built-in defaults (element-
+        specific `list_style` default applied for selector-type kinds).
+
+    Raises
+    ------
+    KeyError
+        If `kind` isn't a built-in kind and has no matching preferences/behavior-class
+        entry in `element_config` — i.e. an unconfigured, non-built-in element type.
+    """
+    if kind in element_config.preferences:
+        prefs = element_config.preferences[kind]
+        if isinstance(prefs, SelectorPreferences) and prefs.list_style is None:
+            default_style = _DEFAULT_LIST_STYLE_BY_KIND.get(kind, "bubble")
+            return SelectorPreferences(
+                list_style=default_style,
+                bold_correct=prefs.bold_correct,
+                display=prefs.display,
+                draw_border=prefs.draw_border,
+            )
+        return prefs
+
+    behavior_class = _BUILTIN_BEHAVIOR_CLASS.get(kind) or element_config.behavior_class.get(kind)
+    if behavior_class is None:
+        raise KeyError(
+            f"No built-in or configured behavior class for widget kind '{kind}'."
+        )
+    if behavior_class == "selector":
+        return SelectorPreferences(list_style=_DEFAULT_LIST_STYLE_BY_KIND.get(kind, "bubble"))
+    return FillInPreferences()

@@ -18,6 +18,7 @@ from pathlib import Path
 
 from pl2docx.config import load_config
 from pl2docx.docx_builder import ZoneQuestions, render_document
+from pl2docx.element_config import ElementConfig, load_element_config
 from pl2docx.html_parser import ParsedQuestion, parse_instance_question_html
 
 
@@ -45,7 +46,9 @@ def _build_zones(html_dir: Path, structure: list[dict]) -> list[ZoneQuestions]:
     return zones
 
 
-def render_instance(instance_dir: Path, template_path: Path) -> tuple[Path, Path]:
+def render_instance(
+    instance_dir: Path, template_path: Path, element_config: ElementConfig | None = None
+) -> tuple[Path, Path]:
     """Render an instance's fetched HTML into blank + key docx files.
 
     Parameters
@@ -59,6 +62,9 @@ def render_instance(instance_dir: Path, template_path: Path) -> tuple[Path, Path
         Docx template — see `pl2docx.docx_builder.render_document` for the
         context shape it must consume, and `pl2docx.starter_template` for a
         generated example.
+    element_config : pl2docx.element_config.ElementConfig or None
+        Instructor-configured element/question-level formatting preferences.
+        `None` (the default) applies built-in defaults for every widget kind.
 
     Returns
     -------
@@ -77,12 +83,14 @@ def render_instance(instance_dir: Path, template_path: Path) -> tuple[Path, Path
         _build_zones(instance_dir / "blank", structure),
         is_answer_key=False,
         output_path=blank_path,
+        element_config=element_config,
     )
     render_document(
         template_path,
         _build_zones(instance_dir / "key", structure),
         is_answer_key=True,
         output_path=key_path,
+        element_config=element_config,
     )
     return blank_path, key_path
 
@@ -96,7 +104,8 @@ def main() -> None:
         template_path = Path(sys.argv[2])
     else:
         template_path = load_config("config.yaml").template_path
-    blank_path, key_path = render_instance(instance_dir, template_path)
+    element_config = load_element_config("config.yaml")
+    blank_path, key_path = render_instance(instance_dir, template_path, element_config)
     print(f"Wrote {blank_path}")
     print(f"Wrote {key_path}")
 

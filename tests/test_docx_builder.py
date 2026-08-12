@@ -2,16 +2,21 @@ import pytest
 from docx import Document
 
 from pl2docx.docx_builder import TemplateUnreadableError, render_document
-from pl2docx.html_parser import ParsedQuestion
+from pl2docx.html_parser import ParsedQuestion, Widget
 
 
 def _mc_question(blank: bool) -> ParsedQuestion:
-    return ParsedQuestion(
-        title="MC Question",
+    widget = Widget(
         kind="multiple_choice",
-        prompt_text="Pick one.",
+        name="statement",
         options=["Alpha", "Beta", "Gamma"],
         correct_option_indices=[] if blank else [1],
+        is_inline=False,
+    )
+    return ParsedQuestion(
+        title="MC Question",
+        prompt_segments=["Pick one.", ""],
+        widgets=[widget],
         answer_panel_text=None if blank else "(B) Beta",
         points="2",
         points_numeric=2.0,
@@ -20,12 +25,11 @@ def _mc_question(blank: bool) -> ParsedQuestion:
 
 
 def _integer_question(blank: bool) -> ParsedQuestion:
+    widget = Widget(kind="integer_input", name="answer")
     return ParsedQuestion(
         title="Integer Question",
-        kind="integer_input",
-        prompt_text="Enter a number.",
-        options=[],
-        correct_option_indices=[],
+        prompt_segments=["Enter a number.", ""],
+        widgets=[widget],
         answer_panel_text=None if blank else "42",
         points="1",
         points_numeric=1.0,
@@ -69,8 +73,9 @@ def test_render_document_blank(starter_template, tmp_path):
     assert "Zone One" in text
     assert "1. MC Question (2 points)" in text
     assert "Pick one." in text
-    assert "(A) Alpha" in text
-    assert "(B) Beta" in text
+    # multiple_choice with no inline signal auto-detects to block display, one option per line
+    assert "○ Alpha" in text
+    assert "○ Beta" in text
     assert "2. Integer Question (1 point)" in text
     assert "course/questions/mc-question" not in text  # qid only shown in the key
     assert "42" not in text
@@ -87,7 +92,7 @@ def test_render_document_key(starter_template, tmp_path):
     assert "42" in text
 
     doc = Document(str(output_path))
-    beta_paragraph = next(p for p in doc.paragraphs if p.text.startswith("(B)"))
+    beta_paragraph = next(p for p in doc.paragraphs if "Beta" in p.text)
     assert any(run.bold for run in beta_paragraph.runs if "Beta" in run.text)
 
 

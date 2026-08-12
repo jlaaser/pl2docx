@@ -21,3 +21,31 @@ output_dir: "output"
 # starting point with `pl2docx-starter-template` (python -m pl2docx.starter_template),
 # then customize its styles/layout in Word.
 template_path: "template.docx"
+
+# Phase 3B: per-element formatting preferences (all keys optional; omitting this
+# section entirely applies built-in defaults for every widget kind). See
+# pl2docx.element_config for the full field reference.
+#
+# global-element-preferences:
+#   pl-multiple-choice:
+#     list-style: bubble        # letter-labels | bubble (default) | checkbox
+#     bold-correct: true        # bold the correct option in the answer key
+#     display: null              # inline | block | template | none | (auto-detect)
+#     draw-border: false        # box the whole widget (all options together)
+#   pl-checkbox:
+#     list-style: checkbox      # letter-labels | bubble | checkbox (default)
+#     bold-correct: true
+#     display: null
+#     draw-border: false
+#   pl-string-input:
+#     display: null              # inline | block (default when undetectable) | template | none
+#     draw-border: false
+#   pl-integer-input:
+#     display: null
+#     draw-border: false
+#
+# additional-elements:
+#   pl-scinum-input:
+#     type: fill-in              # selector | fill-in - which built-in behavior set to extend
+#     display: null
+#     draw-border: false

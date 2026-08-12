@@ -17,6 +17,7 @@ from typing import TypedDict
 from docx.opc.exceptions import PackageNotFoundError
 from docxtpl import DocxTemplate
 
+from pl2docx.element_config import ElementConfig
 from pl2docx.element_renderer import build_question_context
 from pl2docx.html_parser import ParsedQuestion
 
@@ -44,6 +45,7 @@ def render_document(
     zones: list[ZoneQuestions],
     is_answer_key: bool,
     output_path: Path,
+    element_config: ElementConfig | None = None,
 ) -> None:
     """Render `zones` into a docx built from `template_path`.
 
@@ -72,6 +74,11 @@ def render_document(
     output_path : pathlib.Path
         Where to save the resulting docx. Parent directories are created if
         needed.
+    element_config : pl2docx.element_config.ElementConfig or None
+        Instructor-configured element/question-level formatting preferences
+        (see `pl2docx.element_config`). `None` (the default) applies
+        built-in defaults for every widget kind, same as an empty
+        `ElementConfig`.
 
     Raises
     ------
@@ -80,6 +87,9 @@ def render_document(
         often because it's currently open in Word, or a cloud-storage sync
         (e.g. OneDrive) hasn't finished writing it yet after a save.
     """
+    if element_config is None:
+        element_config = ElementConfig(preferences={}, behavior_class={})
+
     tpl = DocxTemplate(str(template_path))
     try:
         tpl.init_docx()
@@ -95,7 +105,8 @@ def render_document(
         {
             "title": zone["title"],
             "questions": [
-                build_question_context(tpl, question, number) for question, number in zone["questions"]
+                build_question_context(tpl, question, number, element_config)
+                for question, number in zone["questions"]
             ],
         }
         for zone in zones
