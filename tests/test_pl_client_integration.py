@@ -3,9 +3,10 @@
 Requires:
 - a local PL server reachable at the configured base_url (default
   http://localhost:3000, matching CLAUDE.md's documented dev setup)
-- a config.yaml in the repo root with course_instance_id/assessment_id
-  pointing at the Phase 1 test assessment (see the phase 0+1 implementation
-  plan / planning_notes for its infoAssessment.json spec)
+- a config.yaml in the repo root with course_short_name/course_instance_short_name/
+  assessment_tid identifying the Phase 1 test assessment (see the phase 0+1
+  implementation plan / planning_notes for its infoAssessment.json spec) -
+  resolved to numeric ids at runtime, so this stays valid across server restarts
 
 Both are auto-detected; the whole module is skipped if either is missing,
 so this suite is safe to run without a live server (e.g. in CI).

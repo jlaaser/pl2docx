@@ -17,10 +17,24 @@ class Config:
     base_url : str
         Root URL of the PrairieLearn server, with no trailing slash, e.g.
         "http://localhost:3000".
-    course_instance_id : int
-        Numeric PrairieLearn course_instance ID to operate within.
-    assessment_id : int
-        Numeric PrairieLearn assessment ID to generate instances for.
+    course_short_name : str
+        The target course's stable `short_name` (e.g. `"CHEM 0110"`), as
+        configured in its `infoCourse.json`. Resolved to a numeric
+        `course_id` at runtime (`pl2docx.pl_client.PLClient.resolve_course_id`)
+        rather than stored as a numeric id directly, since a course's
+        numeric id can change across restarts of an ephemeral-database PL
+        server (see CLAUDE.md's Docker gotcha note).
+    course_instance_short_name : str
+        The target course instance's stable `short_name` (e.g.
+        `"0110-Test"`), as configured in its `infoCourseInstance.json`.
+        Resolved to a numeric `course_instance_id` at runtime for the same
+        reason as `course_short_name`.
+    assessment_tid : str
+        The target assessment's stable `tid` — its directory name under
+        `assessments/` in the course repo (e.g. `"pl2docx-phase1-test"`).
+        Resolved to a numeric `assessment_id` at runtime for the same
+        reason as `course_short_name`. Deliberately not matched by title,
+        which is editable independent of `tid`.
     n_instances : int
         Number of instances to generate when running the fetch script.
     output_dir : pathlib.Path
@@ -33,15 +47,15 @@ class Config:
 
     Notes
     -----
-    Assumes all fields are already resolved to concrete values; does not
-    validate that the referenced course instance or assessment actually
-    exist on the target server (that only becomes apparent when the first
-    request fails).
+    Does not validate that the referenced course/course-instance/assessment
+    actually exist on the target server — that's `PLClient.resolve_*`'s job,
+    called once per `fetch_n_instances` run against the live server.
     """
 
     base_url: str
-    course_instance_id: int
-    assessment_id: int
+    course_short_name: str
+    course_instance_short_name: str
+    assessment_tid: str
     n_instances: int
     output_dir: Path
     template_path: Path
@@ -73,7 +87,7 @@ def load_config(path: str | Path) -> Config:
     with path.open("r", encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
 
-    required = ("base_url", "course_instance_id", "assessment_id")
+    required = ("base_url", "course_short_name", "course_instance_short_name", "assessment_tid")
     missing = [key for key in required if raw.get(key) is None]
     if missing:
         raise ValueError(
@@ -83,8 +97,9 @@ def load_config(path: str | Path) -> Config:
 
     return Config(
         base_url=str(raw["base_url"]).rstrip("/"),
-        course_instance_id=int(raw["course_instance_id"]),
-        assessment_id=int(raw["assessment_id"]),
+        course_short_name=str(raw["course_short_name"]),
+        course_instance_short_name=str(raw["course_instance_short_name"]),
+        assessment_tid=str(raw["assessment_tid"]),
         n_instances=int(raw.get("n_instances", 1)),
         output_dir=Path(raw.get("output_dir", "output")),
         template_path=Path(raw.get("template_path", "template.docx")),

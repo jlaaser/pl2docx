@@ -1,4 +1,11 @@
-from pl2docx.pl_client import ZoneGroup, parse_zone_groups
+from pl2docx.pl_client import (
+    ZoneGroup,
+    extract_assessment_tid,
+    parse_assessment_ids,
+    parse_course_instances,
+    parse_courses_with_instructor_access,
+    parse_zone_groups,
+)
 
 OVERVIEW_PAGE = """
 <html><body>
@@ -58,3 +65,74 @@ def test_parse_zone_groups_dedupes_repeated_links():
     """
     zones = parse_zone_groups(html)
     assert zones == [ZoneGroup(title="Zone", instance_question_ids=[9])]
+
+
+HOMEPAGE = """
+<html><body>
+<table><tbody>
+<tr><td><a href="/pl/course/1">CHEM 0110<!-- -->: <!-- -->General Chemistry I</a></td></tr>
+<tr><td><a href="/pl/course/3">QA 101<!-- -->: <!-- -->Test Course</a></td></tr>
+<tr><td><a href="/pl/course/2">XC 101<!-- -->: <!-- -->Example Course</a></td></tr>
+</tbody></table>
+</body></html>
+"""
+
+
+def test_parse_courses_with_instructor_access():
+    courses = parse_courses_with_instructor_access(HOMEPAGE)
+    assert courses == {"CHEM 0110": 1, "QA 101": 3, "XC 101": 2}
+
+
+COURSE_INSTANCES_PAGE = """
+<html><body>
+<table>
+<thead><tr><th>Long Name</th><th>Short name</th></tr></thead>
+<tbody>
+<tr><td class="align-left"><a href="/pl/course_instance/3/instructor/instance_admin">CHEM 0110 - Fall 2026 - Laaser</a></td><td class="align-left">laaser-f26</td></tr>
+<tr><td class="align-left"><a href="/pl/course_instance/1/instructor/instance_admin">CHEM 0110 Test Course</a></td><td class="align-left">0110-Test</td></tr>
+</tbody>
+</table>
+</body></html>
+"""
+
+
+def test_parse_course_instances():
+    instances = parse_course_instances(COURSE_INSTANCES_PAGE)
+    assert instances == {"laaser-f26": 3, "0110-Test": 1}
+
+
+def test_parse_course_instances_ignores_header_row():
+    instances = parse_course_instances(COURSE_INSTANCES_PAGE)
+    assert "Short name" not in instances
+    assert "Long Name" not in instances
+
+
+ASSESSMENTS_LIST_PAGE = """
+<html><body>
+<table><tbody>
+<tr><td><a href="/pl/course_instance/1/instructor/assessment/2/">PrairieLearn Intro/Tutorial</a></td></tr>
+<tr><td><a href="/pl/course_instance/1/instructor/assessment/4/">pl2docx Phase 1 test</a></td></tr>
+</tbody></table>
+</body></html>
+"""
+
+
+def test_parse_assessment_ids():
+    assert parse_assessment_ids(ASSESSMENTS_LIST_PAGE) == [2, 4]
+
+
+def test_parse_assessment_ids_dedupes_repeated_links():
+    html = """
+    <a href="/pl/course_instance/1/instructor/assessment/4/">pl2docx Phase 1 test</a>
+    <a href="/pl/course_instance/1/instructor/assessment/4/questions">Questions</a>
+    """
+    assert parse_assessment_ids(html) == [4]
+
+
+def test_extract_assessment_tid_found():
+    html = '<script type="application/json">{"assessment":{"id":"4","tid":"pl2docx-phase1-test"}}</script>'
+    assert extract_assessment_tid(html) == "pl2docx-phase1-test"
+
+
+def test_extract_assessment_tid_not_found():
+    assert extract_assessment_tid("<html><body>no json here</body></html>") is None

@@ -2,13 +2,26 @@
 
 base_url: "http://localhost:3000"
 
-# Numeric PrairieLearn course_instance id, e.g. from the URL
-# http://localhost:3000/pl/course_instance/<this number>/instructor/...
-course_instance_id: null
+# These identify the target course/course-instance/assessment by their stable,
+# human-authored PL identifiers rather than numeric database ids - the local dev
+# server's database is ephemeral (re-synced from disk on every restart), so numeric
+# ids can silently change and are not safe to hardcode here. pl2docx resolves these
+# to the server's current numeric ids at the start of every fetch run.
 
-# Numeric PrairieLearn assessment id, e.g. from the URL
-# http://localhost:3000/pl/course_instance/.../instructor/assessment/<this number>/...
-assessment_id: null
+# A course's short_name (its infoCourse.json "shortName"), e.g. "CHEM 0110". Shown,
+# colon-separated from the title, on the PL homepage's course list
+# (e.g. "CHEM 0110: General Chemistry I" -> short_name is "CHEM 0110").
+course_short_name: null
+
+# A course instance's short_name (its infoCourseInstance.json "shortName"), e.g.
+# "0110-Test". Shown as its own "Short name" column on
+# /pl/course/<course_id>/course_admin/instances.
+course_instance_short_name: null
+
+# An assessment's tid - its directory name under assessments/ in the course repo,
+# e.g. an assessment at assessments/pl2docx-phase1-test/infoAssessment.json has
+# tid "pl2docx-phase1-test". Deliberately not the assessment's (editable) title.
+assessment_tid: null
 
 # Number of distinct instances to generate when running the fetch script.
 n_instances: 3

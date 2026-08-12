@@ -53,12 +53,17 @@ Current structure:
 ├── planning_notes/                # notes about architecture decisions, etc
 ├── src/pl2docx/                   # package source (uv src layout)
 │   ├── config.py                  # Config dataclass + load_config() (reads config.yaml,
-│   │                               #   incl. template_path)
+│   │                               #   incl. template_path). course/course_instance/assessment are
+│   │                               #   identified by PL's stable short_name/tid strings, not numeric
+│   │                               #   ids - see pl_client.py's resolve_* methods
 │   ├── csrf.py                    # extract_csrf_token() - scrape PL's per-request CSRF token
 │   ├── pl_client.py               # PLClient - drives the real PL server (auth, effective-user,
 │   │                               #   instance create/regenerate, blank/key HTML fetch,
-│   │                               #   binary/image fetch); parse_zone_groups() - pure fn parsing
-│   │                               #   zone/question structure from the assessment_instance page
+│   │                               #   binary/image fetch, short_name/tid -> numeric id resolution
+│   │                               #   via resolve_course_id/resolve_course_instance_id/
+│   │                               #   resolve_assessment_id); parse_zone_groups() and friends -
+│   │                               #   pure fns parsing zone/question structure and id-resolution
+│   │                               #   source pages, each testable offline against saved HTML
 │   ├── fetch.py                   # CLI entry point (python -m pl2docx.fetch / `pl2docx-fetch`) -
 │   │                               #   also downloads same-origin <img>s into files/ next to each
 │   │                               #   instance_question's HTML, rewriting src to the local path,
@@ -297,26 +302,31 @@ not guessed at up front.
 - Headless browser tooling for the `pl-drawing` fallback: **Playwright**.
 - **Local PrairieLearn Server**: a local PrairieLearn dev instance
   is running via wsl and Docker at http://localhost:3000/.  If this does not load, it can be restarted by running `docker run -it --rm -p 3000:3000 -v ~/pl-pitt-chem0110:/course prairielearn/prairielearn` in wsl.  If this fails, ask for help - it may require the user to perform a manual restart.
-  - **Confirmed gotcha (2026-08-12): every restart reassigns fresh numeric IDs.** The
-    `--rm` flag with no persistent volume for Postgres means each container start is a
-    genuinely fresh database — the course gets re-synced from disk from scratch, and
-    `assessment`/`course_instance`/etc. get new auto-increment ids, not necessarily the
-    same ones as before. `config.yaml`'s `assessment_id` (and, in principle,
-    `course_instance_id`, though in practice it has stayed `1` since this course only has
-    one instance) can silently go stale after a restart. Symptom: `test_pl_client_integration.py`
-    (or any real `pl2docx-fetch` run) fails with a 403 whose page body says "This
-    assessment's configuration does not allow you to access it right now." — this reads
-    like an access-control/permissions problem but is actually
-    `selectAndAuthzAssessment.sql`'s `WHERE a.id = $assessment_id AND a.course_instance_id
-    = $course_instance_id` matching zero rows (a not-found, not a real authz denial).
-    **Diagnosis/fix**: log in as the authenticated dev user (any fresh session
-    auto-authenticates per `middlewares/authn.ts`) and browse
-    `/pl/course_instance/<id>/instructor/instance_admin/assessments` to read off the
-    current numeric id for the assessment by its title (e.g. "pl2docx Phase 1 test"),
-    then update `config.yaml`. A more durable fix, if this recurs often enough to be
-    worth it: mount a persistent volume for PL's Postgres data dir so ids survive
-    restarts — not done as of this note, since `--rm`/ephemeral-DB is also convenient for
-    getting a clean slate.
+  - **Confirmed gotcha (2026-08-12), fixed structurally the same day: every restart
+    reassigns fresh numeric IDs.** The `--rm` flag with no persistent volume for
+    Postgres means each container start is a genuinely fresh database — the course
+    gets re-synced from disk from scratch, and `assessment`/`course_instance`/`course`
+    rows get new auto-increment ids, not necessarily the same ones as before.
+    Originally hit as: `config.yaml`'s numeric `assessment_id` silently went stale
+    after a restart, and `pl2docx-fetch`/`test_pl_client_integration.py` failed with a
+    403 whose page body says "This assessment's configuration does not allow you to
+    access it right now." — reads like an access-control/permissions problem, but is
+    actually `selectAndAuthzAssessment.sql`'s `WHERE a.id = $assessment_id AND
+    a.course_instance_id = $course_instance_id` matching zero rows (a not-found, not a
+    real authz denial). If you ever see that exact message, check for a numeric-id
+    mismatch first, not a real permissions/accessControl issue.
+    **Fix (implemented in `pl_client.py`/`config.py`/`fetch.py`)**: `config.yaml` no
+    longer stores numeric ids at all — it stores PL's stable, human-authored text
+    identifiers (`course_short_name`, `course_instance_short_name`, `assessment_tid`),
+    resolved to the server's *current* numeric ids at the start of every
+    `fetch_n_instances` run via `PLClient.resolve_course_id`/
+    `resolve_course_instance_id`/`resolve_assessment_id`. See `pl_client.py`'s module
+    docstring for exactly which pages each stable identifier is scraped from
+    (`tid` in particular needs an extra per-assessment request, since PL's assessments
+    list page doesn't expose it — see that docstring before assuming a shortcut
+    exists). A `/pl/api/v1/` JSON API exists for the assessment lookup specifically but
+    requires a separately-issued API token, so isn't used, to keep this working purely
+    off the same session-cookie auth the rest of `pl_client.py` already relies on.
   
 ## Docstrings
 

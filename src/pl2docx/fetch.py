@@ -108,6 +108,14 @@ def fetch_n_instances(config: Config) -> list[int]:
 
     Notes
     -----
+    Resolves `config`'s stable `course_short_name`/`course_instance_short_name`/
+    `assessment_tid` identifiers to the server's *current* numeric ids once,
+    up front (`PLClient.resolve_course_id`/`resolve_course_instance_id`/
+    `resolve_assessment_id`) — the target PL server runs in an ephemeral
+    Docker container with no persistent database, so numeric ids can change
+    across restarts; resolving by stable identifier avoids `config.yaml`
+    silently going stale (see CLAUDE.md's Docker gotcha note).
+
     Each instance is fully processed (blank fetch, close, key fetch) before
     the next one is created, so instances never overlap in "open" state.
     Relies on the authenticated user already having course role Previewer or
@@ -124,22 +132,24 @@ def fetch_n_instances(config: Config) -> list[int]:
     """
     client = PLClient(config.base_url)
 
+    course_id = client.resolve_course_id(config.course_short_name)
+    course_instance_id = client.resolve_course_instance_id(course_id, config.course_instance_short_name)
+    assessment_id = client.resolve_assessment_id(course_instance_id, config.assessment_tid)
+
     instance_ids: list[int] = []
     for i in range(config.n_instances):
-        assessment_instance_id = client.create_or_regenerate_instance(
-            config.course_instance_id, config.assessment_id
-        )
+        assessment_instance_id = client.create_or_regenerate_instance(course_instance_id, assessment_id)
         print(f"[{i + 1}/{config.n_instances}] created assessment_instance {assessment_instance_id}")
 
-        zones = client.list_instance_questions(config.course_instance_id, assessment_instance_id)
+        zones = client.list_instance_questions(course_instance_id, assessment_instance_id)
         _write_structure(config.output_dir, assessment_instance_id, zones)
         instance_question_ids = [iq_id for zone in zones for iq_id in zone.instance_question_ids]
 
-        blank_html = client.fetch_instance_questions(config.course_instance_id, instance_question_ids)
+        blank_html = client.fetch_instance_questions(course_instance_id, instance_question_ids)
         _write_html(client, config.output_dir, assessment_instance_id, "blank", blank_html)
 
-        client.close_instance(config.course_instance_id, assessment_instance_id)
-        key_html = client.fetch_instance_questions(config.course_instance_id, instance_question_ids)
+        client.close_instance(course_instance_id, assessment_instance_id)
+        key_html = client.fetch_instance_questions(course_instance_id, instance_question_ids)
         _write_html(client, config.output_dir, assessment_instance_id, "key", key_html)
 
         instance_ids.append(assessment_instance_id)
