@@ -297,6 +297,26 @@ not guessed at up front.
 - Headless browser tooling for the `pl-drawing` fallback: **Playwright**.
 - **Local PrairieLearn Server**: a local PrairieLearn dev instance
   is running via wsl and Docker at http://localhost:3000/.  If this does not load, it can be restarted by running `docker run -it --rm -p 3000:3000 -v ~/pl-pitt-chem0110:/course prairielearn/prairielearn` in wsl.  If this fails, ask for help - it may require the user to perform a manual restart.
+  - **Confirmed gotcha (2026-08-12): every restart reassigns fresh numeric IDs.** The
+    `--rm` flag with no persistent volume for Postgres means each container start is a
+    genuinely fresh database — the course gets re-synced from disk from scratch, and
+    `assessment`/`course_instance`/etc. get new auto-increment ids, not necessarily the
+    same ones as before. `config.yaml`'s `assessment_id` (and, in principle,
+    `course_instance_id`, though in practice it has stayed `1` since this course only has
+    one instance) can silently go stale after a restart. Symptom: `test_pl_client_integration.py`
+    (or any real `pl2docx-fetch` run) fails with a 403 whose page body says "This
+    assessment's configuration does not allow you to access it right now." — this reads
+    like an access-control/permissions problem but is actually
+    `selectAndAuthzAssessment.sql`'s `WHERE a.id = $assessment_id AND a.course_instance_id
+    = $course_instance_id` matching zero rows (a not-found, not a real authz denial).
+    **Diagnosis/fix**: log in as the authenticated dev user (any fresh session
+    auto-authenticates per `middlewares/authn.ts`) and browse
+    `/pl/course_instance/<id>/instructor/instance_admin/assessments` to read off the
+    current numeric id for the assessment by its title (e.g. "pl2docx Phase 1 test"),
+    then update `config.yaml`. A more durable fix, if this recurs often enough to be
+    worth it: mount a persistent volume for PL's Postgres data dir so ids survive
+    restarts — not done as of this note, since `--rm`/ephemeral-DB is also convenient for
+    getting a clean slate.
   
 ## Docstrings
 
