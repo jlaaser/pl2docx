@@ -3,9 +3,12 @@ from pathlib import Path
 import pytest
 
 from pl2docx.html_parser import (
+    ImageRef,
+    MathRef,
     UnsupportedElementError,
     format_points_text,
     parse_instance_question_html,
+    plain_text,
 )
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "instance_question"
@@ -15,14 +18,34 @@ def _load(name: str) -> str:
     return (FIXTURES_DIR / name).read_text(encoding="utf-8")
 
 
+def _segments(q) -> list[str]:
+    return [plain_text(seg) for seg in q.prompt_segments]
+
+
+def _options(widget) -> list[str]:
+    return [plain_text(opt) for opt in widget.options]
+
+
+def _label(widget) -> str | None:
+    return plain_text(widget.label) if widget.label is not None else None
+
+
+def _suffix(widget) -> str | None:
+    return plain_text(widget.suffix) if widget.suffix is not None else None
+
+
+def _answer(q) -> str | None:
+    return plain_text(q.answer_panel_text) if q.answer_panel_text is not None else None
+
+
 def test_multiple_choice_blank():
     q = parse_instance_question_html(_load("multiple_choice_blank.html"))
     assert q.title == "Sample Multiple Choice Question"
     assert len(q.widgets) == 1
     widget = q.widgets[0]
     assert widget.kind == "multiple_choice"
-    assert "Which of these statements is true?" in q.prompt_segments[0]
-    assert widget.options == ["Option A text", "Option B text", "Option C text"]
+    assert "Which of these statements is true?" in plain_text(q.prompt_segments[0])
+    assert _options(widget) == ["Option A text", "Option B text", "Option C text"]
     assert widget.correct_option_indices == []
     assert q.answer_panel_text is None
     assert q.points == "1"
@@ -34,9 +57,9 @@ def test_multiple_choice_key():
     q = parse_instance_question_html(_load("multiple_choice_key.html"))
     widget = q.widgets[0]
     assert widget.kind == "multiple_choice"
-    assert widget.options == ["Option A text", "Option B text", "Option C text"]
+    assert _options(widget) == ["Option A text", "Option B text", "Option C text"]
     assert widget.correct_option_indices == [1]
-    assert q.answer_panel_text == "(B) Option B text"
+    assert _answer(q) == "(B) Option B text"
     assert q.points == "1"
 
 
@@ -47,7 +70,7 @@ def test_multiple_choice_hidden_answer_key():
     assert widget.kind == "multiple_choice"
     # No <li> to match against options -> no bolding hint, but this must not raise.
     assert widget.correct_option_indices == []
-    assert q.answer_panel_text == (
+    assert _answer(q) == (
         "Option B is correct because it is the only statement consistent with the setup described above."
     )
     assert q.points == "2"
@@ -57,7 +80,7 @@ def test_checkbox_blank():
     q = parse_instance_question_html(_load("checkbox_blank.html"))
     widget = q.widgets[0]
     assert widget.kind == "checkbox"
-    assert widget.options == ["Choice A text", "Choice B text", "Choice C text"]
+    assert _options(widget) == ["Choice A text", "Choice B text", "Choice C text"]
     assert widget.correct_option_indices == []
     assert q.answer_panel_text is None
 
@@ -67,14 +90,14 @@ def test_checkbox_key():
     widget = q.widgets[0]
     assert widget.kind == "checkbox"
     assert widget.correct_option_indices == [0, 2]
-    assert q.answer_panel_text == "(A) Choice A text (C) Choice C text"
+    assert _answer(q) == "(A) Choice A text (C) Choice C text"
 
 
 def test_string_input_blank():
     q = parse_instance_question_html(_load("string_input_blank.html"))
     widget = q.widgets[0]
     assert widget.kind == "string_input"
-    assert "Type the name of the sample compound." in q.prompt_segments[0]
+    assert "Type the name of the sample compound." in plain_text(q.prompt_segments[0])
     assert widget.options == []
     assert widget.correct_option_indices == []
     assert q.answer_panel_text is None
@@ -83,20 +106,20 @@ def test_string_input_blank():
 def test_string_input_key():
     q = parse_instance_question_html(_load("string_input_key.html"))
     assert q.widgets[0].kind == "string_input"
-    assert q.answer_panel_text == "sodium chloride"
+    assert _answer(q) == "sodium chloride"
 
 
 def test_integer_input_blank():
     q = parse_instance_question_html(_load("integer_input_blank.html"))
     assert q.widgets[0].kind == "integer_input"
-    assert "Enter the number of protons." in q.prompt_segments[0]
+    assert "Enter the number of protons." in plain_text(q.prompt_segments[0])
     assert q.answer_panel_text is None
 
 
 def test_integer_input_key():
     q = parse_instance_question_html(_load("integer_input_key.html"))
     assert q.widgets[0].kind == "integer_input"
-    assert q.answer_panel_text == "11"
+    assert _answer(q) == "11"
     assert q.points == "1"
 
 
@@ -134,9 +157,9 @@ def test_compound_question_is_supported():
     """
     q = parse_instance_question_html(html)
     assert [w.name for w in q.widgets] == ["statement-0", "statement-1"]
-    assert q.widgets[0].options == ["A0"]
-    assert q.widgets[1].options == ["A1"]
-    assert q.prompt_segments == ["Text A", "Text B", "Text C"]
+    assert _options(q.widgets[0]) == ["A0"]
+    assert _options(q.widgets[1]) == ["A1"]
+    assert _segments(q) == ["Text A", "Text B", "Text C"]
 
 
 def test_compound_dropdown_question_is_supported():
@@ -164,8 +187,8 @@ def test_compound_dropdown_question_is_supported():
     q = parse_instance_question_html(html)
     assert [w.name for w in q.widgets] == ["statement-0", "statement-1"]
     assert all(w.is_dropdown for w in q.widgets)
-    assert q.widgets[0].options == ["A0"]
-    assert q.widgets[1].options == ["A1"]
+    assert _options(q.widgets[0]) == ["A0"]
+    assert _options(q.widgets[1]) == ["A1"]
 
 
 def test_fill_in_label_and_suffix_extracted():
@@ -183,8 +206,8 @@ def test_fill_in_label_and_suffix_extracted():
     """
     q = parse_instance_question_html(html)
     widget = q.widgets[0]
-    assert widget.label == "pH ="
-    assert widget.suffix == "units"
+    assert _label(widget) == "pH ="
+    assert _suffix(widget) == "units"
 
 
 def test_number_input_detected():
@@ -205,8 +228,8 @@ def test_number_input_detected():
     q = parse_instance_question_html(html)
     widget = q.widgets[0]
     assert widget.kind == "number_input"
-    assert widget.label == "x ="
-    assert widget.suffix == "m/s"
+    assert _label(widget) == "x ="
+    assert _suffix(widget) == "m/s"
 
 
 def test_units_input_detected():
@@ -311,9 +334,9 @@ def test_additional_fill_in_tag_compound_question():
     q = parse_instance_question_html(html, additional_fill_in_tags=["pl-scinum-input"])
     assert [w.kind for w in q.widgets] == ["pl-scinum-input", "pl-scinum-input"]
     assert [w.name for w in q.widgets] == ["first", "second"]
-    assert q.widgets[0].label == "98.0:"
-    assert q.widgets[1].label == "N_A:"
-    assert q.prompt_segments == ["Part A:", "Part B:", ""]
+    assert _label(q.widgets[0]) == "98.0:"
+    assert _label(q.widgets[1]) == "N_A:"
+    assert _segments(q) == ["Part A:", "Part B:", ""]
 
 
 def test_checkbox_help_text_and_hidden_legend_stripped():
@@ -340,8 +363,8 @@ def test_checkbox_help_text_and_hidden_legend_stripped():
     </div>
     """
     q = parse_instance_question_html(html)
-    assert q.prompt_segments == ["Pick some.", ""]
-    assert q.widgets[0].options == ["Alpha"]
+    assert _segments(q) == ["Pick some.", ""]
+    assert _options(q.widgets[0]) == ["Alpha"]
 
 
 def test_bare_form_text_class_not_stripped():
@@ -360,7 +383,7 @@ def test_bare_form_text_class_not_stripped():
     </div>
     """
     q = parse_instance_question_html(html)
-    assert "g/mol" in " ".join(q.prompt_segments)
+    assert "g/mol" in " ".join(_segments(q))
 
 
 def test_no_points_panel_gives_none():
@@ -395,6 +418,141 @@ def test_qid_extracted_when_staff_info_panel_present():
     """
     q = parse_instance_question_html(html)
     assert q.qid == "TEST/pl-integer-input"
+
+
+def test_rich_text_fixture_blank():
+    q = parse_instance_question_html(_load("rich_text_blank.html"))
+    nodes = q.prompt_segments[0]
+    assert "limiting reagent" in plain_text(nodes)
+    assert any(getattr(n, "bold", False) and "limiting reagent" in n.text for n in nodes)
+    assert any(getattr(n, "italic", False) and "fully consumed" in n.text for n in nodes)
+    assert any(getattr(n, "underline", False) and "in excess" in n.text for n in nodes)
+    assert q.answer_panel_text is None
+
+
+def test_rich_text_fixture_key():
+    from pl2docx.html_parser import ListItemStart
+
+    q = parse_instance_question_html(_load("rich_text_key.html"))
+    answer_nodes = q.answer_panel_text
+    assert answer_nodes is not None
+    assert "Oxygen: 0 mol remaining" in plain_text(answer_nodes)
+    assert any(getattr(n, "bold", False) and "limiting reagent" in n.text for n in answer_nodes)
+    assert any(getattr(n, "italic", False) and n.text == "oxygen" for n in answer_nodes)
+    assert any(isinstance(n, ListItemStart) for n in answer_nodes)
+
+
+def test_prompt_bold_italic_underline_preserved():
+    """Phase 4 increment 1: <strong>/<em>/<u> formatting must survive as node
+    attributes, not be flattened away like Phase 2/3's get_text()-based parsing."""
+    html = """
+    <div class="question-block">
+      <div class="card-header"><h1>Rich text</h1></div>
+      <div class="card-body question-body">
+        <p>This is <strong>bold</strong>, <em>italic</em>, and <u>underlined</u> text.</p>
+        <span class="input-group pl-integer-input">
+          <input class="form-control pl-integer-input-input" name="answer" type="text">
+        </span>
+      </div>
+    </div>
+    """
+    q = parse_instance_question_html(html)
+    nodes = q.prompt_segments[0]
+    assert plain_text(nodes) == "This is bold, italic, and underlined text."
+
+    bold_nodes = [n for n in nodes if getattr(n, "bold", False)]
+    italic_nodes = [n for n in nodes if getattr(n, "italic", False)]
+    underline_nodes = [n for n in nodes if getattr(n, "underline", False)]
+    assert any(n.text == "bold" for n in bold_nodes)
+    assert any(n.text == "italic" for n in italic_nodes)
+    assert any(n.text == "underlined" for n in underline_nodes)
+    # plain surrounding text must not pick up the formatting
+    assert not any(getattr(n, "bold", False) for n in nodes if n.text.strip() == "This is")
+
+
+def test_prompt_paragraphs_and_list_preserved():
+    """Multiple <p> blocks and a <ul><li> list should produce ParagraphBreak/
+    ListItemStart nodes at the right positions, not silently vanish."""
+    from pl2docx.html_parser import ListItemStart, ParagraphBreak
+
+    html = """
+    <div class="question-block">
+      <div class="card-header"><h1>Paragraphs and lists</h1></div>
+      <div class="card-body question-body">
+        <p>First paragraph.</p>
+        <p>Second paragraph.</p>
+        <ul>
+          <li>Item one</li>
+          <li>Item two</li>
+        </ul>
+        <span class="input-group pl-integer-input">
+          <input class="form-control pl-integer-input-input" name="answer" type="text">
+        </span>
+      </div>
+    </div>
+    """
+    q = parse_instance_question_html(html)
+    nodes = q.prompt_segments[0]
+    assert plain_text(nodes) == "First paragraph. Second paragraph. Item one Item two"
+    assert any(isinstance(n, ParagraphBreak) for n in nodes)
+    assert any(isinstance(n, ListItemStart) for n in nodes)
+
+
+def test_prompt_image_and_math_recognized_but_not_yet_rendered():
+    """Phase 4 increment 1 scope: the walker recognizes <img> as an ImageRef and
+    keeps raw $...$/$$...$$ math text as plain text (increments 2/3 handle real
+    embedding/OMML conversion) - both must be recognized, not silently dropped."""
+    html = """
+    <div class="question-block">
+      <div class="card-header"><h1>Image and math</h1></div>
+      <div class="card-body question-body">
+        <p>See <img src="files/1_0_diagram.png" alt="a diagram"> and $x^2$.</p>
+        <span class="input-group pl-integer-input">
+          <input class="form-control pl-integer-input-input" name="answer" type="text">
+        </span>
+      </div>
+    </div>
+    """
+    q = parse_instance_question_html(html)
+    nodes = q.prompt_segments[0]
+    images = [n for n in nodes if isinstance(n, ImageRef)]
+    assert len(images) == 1
+    assert images[0].local_path == "files/1_0_diagram.png"
+    assert images[0].alt == "a diagram"
+    # Math detection itself is increment 3 scope - raw delimiters stay literal text for now.
+    assert "$x^2$" in plain_text(nodes)
+    assert not any(isinstance(n, MathRef) for n in nodes)
+
+
+def test_option_and_label_rich_content_preserved():
+    """Confirmed by the user: real course content has LaTeX in MC option text and
+    fill-in label/suffix text, so these must carry rich nodes too, not plain str."""
+    html = """
+    <div class="question-block">
+      <div class="card-header"><h1>Rich option and label</h1></div>
+      <div class="card-body question-body">
+        <div class="form-check">
+          <input type="radio" name="answer" value="a">
+          <label><div class="pl-multiple-choice-answer">The <strong>correct</strong> answer</div></label>
+        </div>
+        <span class="input-group pl-string-input">
+          <span class="input-group-text"><em>pH</em> =</span>
+          <input class="form-control pl-string-input-input" name="ph" type="text">
+        </span>
+      </div>
+    </div>
+    """
+    q = parse_instance_question_html(html)
+    mc_widget = next(w for w in q.widgets if w.kind == "multiple_choice")
+    fill_in_widget = next(w for w in q.widgets if w.kind == "string_input")
+
+    option_nodes = mc_widget.options[0]
+    assert plain_text(option_nodes) == "The correct answer"
+    assert any(getattr(n, "bold", False) and n.text == "correct" for n in option_nodes)
+
+    label_nodes = fill_in_widget.label
+    assert plain_text(label_nodes) == "pH ="
+    assert any(getattr(n, "italic", False) and n.text == "pH" for n in label_nodes)
 
 
 def test_format_points_text():

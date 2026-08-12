@@ -30,7 +30,18 @@ from pl2docx.element_config import (
     ElementPreferences,
     resolve_preferences,
 )
-from pl2docx.html_parser import ParsedQuestion, Widget, format_points_text, option_letter
+from pl2docx.html_parser import (
+    ContentNode,
+    ImageRef,
+    ListItemStart,
+    MathRef,
+    ParagraphBreak,
+    ParsedQuestion,
+    TextRun,
+    Widget,
+    format_points_text,
+    option_letter,
+)
 
 ANSWER_SPACE_BLANK_LINES = 2
 
@@ -97,19 +108,15 @@ def _build_question_contents(tpl: DocxTemplate, question: ParsedQuestion, elemen
 
     state = {"paragraph": subdoc.add_paragraph()}
 
-    def append_text(text: str) -> None:
-        if not text:
-            return
-        paragraph = state["paragraph"]
-        prefix = " " if paragraph.runs else ""
-        paragraph.add_run(prefix + text)
+    def append_nodes(nodes: list[ContentNode]) -> None:
+        _render_nodes_into_subdoc(state, subdoc, nodes)
 
     if not question.widgets:
-        append_text(question.prompt_segments[0] if question.prompt_segments else "")
+        append_nodes(question.prompt_segments[0] if question.prompt_segments else [])
         return subdoc, answer_element
 
     for i, widget in enumerate(question.widgets):
-        append_text(question.prompt_segments[i])
+        append_nodes(question.prompt_segments[i])
 
         prefs = resolve_preferences(element_config, widget.kind)
         display = _resolve_display(widget, prefs)
@@ -137,8 +144,82 @@ def _build_question_contents(tpl: DocxTemplate, question: ParsedQuestion, elemen
             for run in runs:
                 _add_run_border(run)
 
-    append_text(question.prompt_segments[-1])
+    append_nodes(question.prompt_segments[-1])
     return subdoc, answer_element
+
+
+def _append_run_text(paragraph, text: str, bold: bool = False, italic: bool = False, underline: bool = False):
+    """Add one run of `text` to `paragraph`, inserting a separating space if needed.
+
+    Mirrors Phase 3B's `append_text` prefix behavior (a paragraph that already
+    has content gets a leading space before the next chunk, unless either
+    side already supplies the whitespace) — now applied uniformly to every
+    run added to a shared paragraph (prompt text, widget-rendered content
+    alike), not just prompt-segment text as before.
+    """
+    if not text:
+        return None
+    if paragraph.runs and not paragraph.runs[-1].text.endswith(" ") and not text.startswith(" "):
+        paragraph.add_run(" ")
+    run = paragraph.add_run(text)
+    run.bold = bold
+    run.italic = italic
+    run.underline = underline
+    return run
+
+
+def _render_nodes_to_paragraph(paragraph, nodes: list[ContentNode]) -> list[Run]:
+    """Render a node sequence inline into a single existing `paragraph`.
+
+    Used for widget-scoped content (selector options, fill-in label/suffix)
+    that's known to be short/inline in practice - `ParagraphBreak`/
+    `ListItemStart` nodes are treated as a plain separator rather than
+    starting a new paragraph, since splitting the paragraph mid-widget-render
+    isn't meaningful here.
+    """
+    runs: list[Run] = []
+    for node in nodes:
+        run = _render_one_node(paragraph, node)
+        if run is not None:
+            runs.append(run)
+    return runs
+
+
+def _render_nodes_into_subdoc(state: dict, sink, nodes: list[ContentNode]) -> None:
+    """Render a node sequence into `sink`, starting new paragraphs on `ParagraphBreak`.
+
+    `state["paragraph"]` is the shared "current paragraph" also used by widget
+    rendering, so prompt text and inline widget content can share one running
+    paragraph exactly as Phase 3B's `append_text` did.
+    """
+    for node in nodes:
+        if isinstance(node, ParagraphBreak):
+            state["paragraph"] = sink.add_paragraph()
+            continue
+        _render_one_node(state["paragraph"], node)
+
+
+def _render_one_node(paragraph, node: ContentNode) -> Run | None:
+    if isinstance(node, TextRun):
+        return _append_run_text(paragraph, node.text, node.bold, node.italic, node.underline)
+    if isinstance(node, ParagraphBreak):
+        # Only reached via `_render_nodes_to_paragraph` (inline widget content) -
+        # `_render_nodes_into_subdoc` intercepts `ParagraphBreak` itself to start
+        # a real new paragraph instead. Here, there's no paragraph to split, so
+        # treat it as a plain word-separating space instead of dropping it.
+        return _append_run_text(paragraph, " ")
+    if isinstance(node, ListItemStart):
+        return _append_run_text(paragraph, "• ")
+    if isinstance(node, ImageRef):
+        # Real picture embedding lands in Phase 4 increment 2; interim
+        # fallback keeps output sane in the meantime.
+        return _append_run_text(paragraph, node.alt or "[image]")
+    if isinstance(node, MathRef):
+        # Real OMML conversion lands in Phase 4 increment 3; interim
+        # fallback keeps output sane in the meantime.
+        delim = "$$" if node.display_mode else "$"
+        return _append_run_text(paragraph, f"{delim}{node.latex}{delim}")
+    return None
 
 
 def _resolve_display(widget: Widget, prefs: ElementPreferences) -> str:
@@ -151,44 +232,71 @@ def _resolve_display(widget: Widget, prefs: ElementPreferences) -> str:
 
 def _render_selector_inline(paragraph, widget: Widget, prefs) -> list[Run]:
     runs: list[Run] = []
-    for idx, option_text in enumerate(widget.options):
+    for idx, option_nodes in enumerate(widget.options):
         if idx > 0:
-            runs.append(paragraph.add_run("   "))
+            spacer_start = len(paragraph.runs)
+            _append_run_text(paragraph, "   ")
+            runs.extend(paragraph.runs[spacer_start:])
+        option_start = len(paragraph.runs)
         marker = _LIST_MARKERS[prefs.list_style](idx)
-        run = paragraph.add_run(f"{marker} {option_text}")
+        _append_run_text(paragraph, f"{marker} ")
+        _render_nodes_to_paragraph(paragraph, option_nodes)
+        combined = list(paragraph.runs[option_start:])
         if prefs.bold_correct and idx in widget.correct_option_indices:
-            run.bold = True
-        runs.append(run)
+            for run in combined:
+                run.bold = True
+        runs.extend(combined)
     return runs
 
 
 def _render_fill_in_inline(paragraph, widget: Widget) -> list[Run]:
-    return [paragraph.add_run(_fill_in_text(widget))]
+    return _fill_in_runs(paragraph, widget)
 
 
 def _render_selector_block(sink, widget: Widget, prefs) -> list[Run]:
     runs: list[Run] = []
-    for idx, option_text in enumerate(widget.options):
+    for idx, option_nodes in enumerate(widget.options):
+        paragraph = sink.add_paragraph()
         marker = _LIST_MARKERS[prefs.list_style](idx)
-        run = sink.add_paragraph().add_run(f"{marker} {option_text}")
+        _append_run_text(paragraph, f"{marker} ")
+        _render_nodes_to_paragraph(paragraph, option_nodes)
+        combined = list(paragraph.runs)
         if prefs.bold_correct and idx in widget.correct_option_indices:
-            run.bold = True
-        runs.append(run)
+            for run in combined:
+                run.bold = True
+        runs.extend(combined)
     return runs
 
 
 def _render_fill_in_block(sink, widget: Widget) -> list[Run]:
-    return [sink.add_paragraph().add_run(_fill_in_text(widget))]
+    paragraph = sink.add_paragraph()
+    return _fill_in_runs(paragraph, widget)
 
 
-def _fill_in_text(widget: Widget) -> str:
+def _fill_in_runs(paragraph, widget: Widget) -> list[Run]:
+    """Render this widget's label/blank/suffix, capturing *every* run added.
+
+    Captures via a paragraph-length snapshot (before/after) rather than
+    collecting each helper call's own return value - `_append_run_text` can
+    silently insert an extra, unbordered separator-space run between calls
+    (e.g. between label and blank) when neither side already has trailing/
+    leading whitespace. Missing that run from the returned list broke
+    `draw-border`'s single-continuous-box look (regression: it split into
+    separate boxes per label/blank/suffix, since Word only merges *adjacent*
+    same-bordered runs, and the untracked spacer run in between was never
+    bordered). Snapshotting picks up literally everything added, spacers
+    included.
+    """
     blank = "_" * 20
+    start = len(paragraph.runs)
     if widget.label is None:
-        return f"Answer: {blank}"
-    text = f"{widget.label} {blank}"
+        _append_run_text(paragraph, f"Answer: {blank}")
+        return list(paragraph.runs[start:])
+    _render_nodes_to_paragraph(paragraph, widget.label)
+    _append_run_text(paragraph, blank)
     if widget.suffix:
-        text += f" {widget.suffix}"
-    return text
+        _render_nodes_to_paragraph(paragraph, widget.suffix)
+    return list(paragraph.runs[start:])
 
 
 def _add_run_border(run: Run) -> None:
@@ -216,7 +324,8 @@ def _add_run_border(run: Run) -> None:
 def _build_answer_contents(tpl: DocxTemplate, question: ParsedQuestion):
     subdoc = tpl.new_subdoc()
     if question.answer_panel_text is not None:
-        subdoc.add_paragraph(question.answer_panel_text)
+        state = {"paragraph": subdoc.add_paragraph()}
+        _render_nodes_into_subdoc(state, subdoc, question.answer_panel_text)
     return subdoc
 
 

@@ -2,22 +2,22 @@ import pytest
 from docx import Document
 
 from pl2docx.docx_builder import TemplateUnreadableError, render_document
-from pl2docx.html_parser import ParsedQuestion, Widget
+from pl2docx.html_parser import ParsedQuestion, Widget, plain
 
 
 def _mc_question(blank: bool) -> ParsedQuestion:
     widget = Widget(
         kind="multiple_choice",
         name="statement",
-        options=["Alpha", "Beta", "Gamma"],
+        options=[plain("Alpha"), plain("Beta"), plain("Gamma")],
         correct_option_indices=[] if blank else [1],
         is_inline=False,
     )
     return ParsedQuestion(
         title="MC Question",
-        prompt_segments=["Pick one.", ""],
+        prompt_segments=[plain("Pick one."), plain("")],
         widgets=[widget],
-        answer_panel_text=None if blank else "(B) Beta",
+        answer_panel_text=None if blank else plain("(B) Beta"),
         points="2",
         points_numeric=2.0,
         qid="course/questions/mc-question",
@@ -28,9 +28,9 @@ def _integer_question(blank: bool) -> ParsedQuestion:
     widget = Widget(kind="integer_input", name="answer")
     return ParsedQuestion(
         title="Integer Question",
-        prompt_segments=["Enter a number.", ""],
+        prompt_segments=[plain("Enter a number."), plain("")],
         widgets=[widget],
-        answer_panel_text=None if blank else "42",
+        answer_panel_text=None if blank else plain("42"),
         points="1",
         points_numeric=1.0,
         qid="course/questions/integer-question",

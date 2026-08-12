@@ -2,7 +2,7 @@ from docxtpl import DocxTemplate
 
 from pl2docx.element_config import ElementConfig, FillInPreferences, SelectorPreferences
 from pl2docx.element_renderer import build_question_context
-from pl2docx.html_parser import ParsedQuestion, Widget
+from pl2docx.html_parser import ParsedQuestion, Widget, plain
 
 
 def _tpl(starter_template) -> DocxTemplate:
@@ -15,15 +15,15 @@ def _mc_question(prompt=("Pick one.", "")):
     widget = Widget(
         kind="multiple_choice",
         name="statement",
-        options=["Alpha", "Beta"],
+        options=[plain("Alpha"), plain("Beta")],
         correct_option_indices=[1],
         is_inline=True,
     )
     return ParsedQuestion(
         title="Q",
-        prompt_segments=list(prompt),
+        prompt_segments=[plain(p) for p in prompt],
         widgets=[widget],
-        answer_panel_text="(B) Beta",
+        answer_panel_text=plain("(B) Beta"),
         points="1",
         points_numeric=1.0,
         qid="q/1",
@@ -31,10 +31,15 @@ def _mc_question(prompt=("Pick one.", "")):
 
 
 def _string_question(label=None, suffix=None):
-    widget = Widget(kind="string_input", name="answer", label=label, suffix=suffix)
+    widget = Widget(
+        kind="string_input",
+        name="answer",
+        label=plain(label) if label is not None else None,
+        suffix=plain(suffix) if suffix is not None else None,
+    )
     return ParsedQuestion(
         title="Q",
-        prompt_segments=["Fill in:", ""],
+        prompt_segments=[plain("Fill in:"), plain("")],
         widgets=[widget],
         answer_panel_text=None,
         points="1",
@@ -157,10 +162,10 @@ def test_additional_element_fill_in_renders_end_to_end(starter_template):
     widget - build_question_context/element_renderer are kind-agnostic beyond
     the built-in selector-kind check."""
     tpl = _tpl(starter_template)
-    widget = Widget(kind="pl-scinum-input", name="first", label="98.0:")
+    widget = Widget(kind="pl-scinum-input", name="first", label=plain("98.0:"))
     question = ParsedQuestion(
         title="Q",
-        prompt_segments=["Part A:", ""],
+        prompt_segments=[plain("Part A:"), plain("")],
         widgets=[widget],
         answer_panel_text=None,
         points="1",
@@ -181,7 +186,7 @@ def test_additional_element_fill_in_renders_end_to_end(starter_template):
 def test_widgets_render_at_source_position():
     """Regression: widget content must appear between its own prompt segments,
     not be appended after the whole prompt."""
-    from pl2docx.html_parser import parse_instance_question_html
+    from pl2docx.html_parser import parse_instance_question_html, plain_text
 
     html = """
     <div class="question-block">
@@ -196,4 +201,70 @@ def test_widgets_render_at_source_position():
     </div>
     """
     q = parse_instance_question_html(html)
-    assert q.prompt_segments == ["Text A", "Text B"]
+    assert [plain_text(seg) for seg in q.prompt_segments] == ["Text A", "Text B"]
+
+
+def test_rich_text_fixture_renders_end_to_end(starter_template):
+    """The rich_text_key.html fixture's bold/italic answer-panel content must
+    survive all the way through build_question_context into real docx runs."""
+    from pathlib import Path
+
+    from pl2docx.html_parser import parse_instance_question_html
+
+    fixtures_dir = Path(__file__).parent / "fixtures" / "instance_question"
+    html = (fixtures_dir / "rich_text_key.html").read_text(encoding="utf-8")
+    question = parse_instance_question_html(html)
+
+    tpl = _tpl(starter_template)
+    element_config = ElementConfig(preferences={}, behavior_class={})
+    ctx = build_question_context(tpl, question, 1, element_config)
+
+    answer_text = _text(ctx["answer_contents"])
+    assert "limiting reagent" in answer_text
+    assert "Oxygen: 0 mol remaining" in answer_text
+
+    bold_run = next(
+        r
+        for p in ctx["answer_contents"].paragraphs
+        for r in p.runs
+        if "limiting reagent" in r.text
+    )
+    assert bold_run.bold is True
+    italic_run = next(
+        r for p in ctx["answer_contents"].paragraphs for r in p.runs if r.text.strip() == "oxygen"
+    )
+    assert italic_run.italic is True
+
+
+def test_prompt_bold_run_rendered_with_real_bold_formatting(starter_template):
+    """Phase 4 increment 1: a bold TextRun node in a prompt segment must produce
+    a real bold run in the rendered subdoc, not just plain concatenated text."""
+    from pl2docx.html_parser import TextRun
+
+    tpl = _tpl(starter_template)
+    widget = Widget(kind="integer_input", name="answer")
+    question = ParsedQuestion(
+        title="Q",
+        prompt_segments=[
+            [TextRun("This is "), TextRun("bold", bold=True), TextRun(" text.")],
+            plain(""),
+        ],
+        widgets=[widget],
+        answer_panel_text=None,
+        points="1",
+        points_numeric=1.0,
+        qid="q/4",
+    )
+    element_config = ElementConfig(preferences={}, behavior_class={})
+    ctx = build_question_context(tpl, question, 1, element_config)
+    text = _text(ctx["question_contents"])
+    assert "This is bold text." in text
+
+    bold_run = next(
+        r for p in ctx["question_contents"].paragraphs for r in p.runs if r.text.strip() == "bold"
+    )
+    assert bold_run.bold is True
+    non_bold_runs = [
+        r for p in ctx["question_contents"].paragraphs for r in p.runs if "This is" in r.text
+    ]
+    assert all(not r.bold for r in non_bold_runs)

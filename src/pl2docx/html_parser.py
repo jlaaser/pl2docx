@@ -61,7 +61,146 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Literal
 
-from bs4 import BeautifulSoup, NavigableString, Tag
+from bs4 import BeautifulSoup, Comment, NavigableString, Tag
+
+
+@dataclass(frozen=True)
+class TextRun:
+    """A run of plain text carrying inline character formatting.
+
+    Parameters
+    ----------
+    text : str
+        The text itself. Already whitespace-collapsed (internal runs of
+        whitespace reduced to a single space) and never empty/whitespace-only
+        except where a single interior space is needed as a separator between
+        differently-formatted neighboring runs.
+    bold, italic, underline : bool
+        Whether `<strong>`/`<b>`, `<em>`/`<i>`, `<u>` (respectively) wrapped
+        this text anywhere in its ancestry within the source HTML.
+    """
+
+    text: str
+    bold: bool = False
+    italic: bool = False
+    underline: bool = False
+
+
+@dataclass(frozen=True)
+class ParagraphBreak:
+    """A paragraph boundary in the source HTML (`<p>`/`<br>`/list-item edges)."""
+
+
+@dataclass(frozen=True)
+class ListItemStart:
+    """Marks the start of an `<li>`'s content, immediately after its `ParagraphBreak`."""
+
+
+@dataclass(frozen=True)
+class ImageRef:
+    """An inline `<img>`, referencing the local file `fetch.py` already downloaded.
+
+    Parameters
+    ----------
+    local_path : str
+        The `<img src>` value as fetched HTML already has it (e.g.
+        `"files/1234_0_diagram.png"`, relative to the instance_question HTML's
+        own directory — see `fetch.py`'s `_download_images`). Not yet resolved
+        to an absolute filesystem path here; that's the renderer's job, since
+        only it knows the instance directory.
+    alt : str
+        The `<img alt>` text, if any. Used as interim fallback display text
+        until image embedding (Phase 4 increment 2) renders the real picture.
+    """
+
+    local_path: str
+    alt: str = ""
+
+
+@dataclass(frozen=True)
+class MathRef:
+    """An inline or display-mode math span, not yet converted to OMML.
+
+    Parameters
+    ----------
+    latex : str
+        The raw LaTeX source, delimiters stripped (e.g. `"x^2"` from
+        `"$x^2$"`).
+    display_mode : bool
+        Whether this was a display-mode span (`$$...$$`/`\\[...\\]`) rather
+        than inline (`$...$`/`\\(...\\)`).
+    """
+
+    latex: str
+    display_mode: bool = False
+
+
+#: One node in a flattened, order-preserving walk of an HTML fragment's content.
+#: Produced by `_walk_content`/consumed by `pl2docx.element_renderer` to render
+#: formatted runs, paragraph breaks, images, and math into a docx Subdoc instead
+#: of the plain strings Phases 2/3 used. `ImageRef`/`MathRef` nodes are recognized
+#: by the walker starting Phase 4 increment 1, but only rendered as their real
+#: picture/OMML form once increments 2/3 land (element_renderer falls back to
+#: alt text / raw LaTeX text until then).
+ContentNode = TextRun | ParagraphBreak | ListItemStart | ImageRef | MathRef
+
+
+def plain(text: str) -> list[ContentNode]:
+    """Wrap a plain string as a single-`TextRun` node sequence.
+
+    Parameters
+    ----------
+    text : str
+        Plain text with no formatting.
+
+    Returns
+    -------
+    list[ContentNode]
+        `[]` if `text` is empty, else a single unformatted `TextRun`.
+
+    Notes
+    -----
+    Convenience for constructing `Widget`/`ParsedQuestion` fixtures/test data
+    by hand; `parse_instance_question_html` itself always produces node
+    sequences via `_walk_content`, never this function.
+    """
+    return [TextRun(text)] if text else []
+
+
+def plain_text(nodes: list[ContentNode]) -> str:
+    """Flatten a node sequence back to plain text, discarding all formatting.
+
+    Parameters
+    ----------
+    nodes : list[ContentNode]
+        A node sequence as found in `ParsedQuestion.prompt_segments`,
+        `Widget.options`, etc.
+
+    Returns
+    -------
+    str
+        `TextRun` text concatenated in order (paragraph/list breaks become a
+        single space); `ImageRef`/`MathRef` nodes contribute their `alt`/
+        `latex` text respectively. Whitespace is collapsed and the result
+        stripped, matching the old `get_text()`-based flattening's shape —
+        useful for callers/tests that only care about the text content.
+    """
+    parts: list[str] = []
+    for node in nodes:
+        if isinstance(node, TextRun):
+            parts.append(node.text)
+        elif isinstance(node, ImageRef):
+            parts.append(node.alt)
+        elif isinstance(node, MathRef):
+            parts.append(node.latex)
+        else:
+            parts.append(" ")
+    # No separator inserted here - each TextRun already carries its own real
+    # whitespace from the source HTML (e.g. "bold" then ", " already has the
+    # comma+space attached), so direct concatenation is what's faithful; only
+    # ParagraphBreak/ListItemStart (mapped to " " above) need a synthetic gap.
+    text = re.sub(r"\s+", " ", "".join(parts))
+    return text.strip()
 
 #: The built-in (zero-config) widget kinds. `Widget.kind` is `str`, not this `Literal`,
 #: since an `additional-elements`-configured widget's `kind` is an arbitrary
@@ -122,9 +261,12 @@ class Widget:
     name : str
         The input `name` attribute shared by this widget's own input tag(s) —
         distinguishes one widget from another on the same page.
-    options : list[str]
-        For `multiple_choice`/`checkbox`, the answer options in on-page order.
-        Empty for every fill-in-type kind.
+    options : list[list[ContentNode]]
+        For `multiple_choice`/`checkbox`, one rich-content node sequence per
+        answer option, in on-page order — carries any formatting/math the
+        option's own source markup had (real course content has LaTeX in
+        option text, confirmed by the user; not guessed). Empty for every
+        fill-in-type kind.
     correct_option_indices : list[int]
         For `multiple_choice`/`checkbox`, best-effort indices into `options` that
         `.answer-body` could be matched back to (for bolding). Always empty for
@@ -140,24 +282,25 @@ class Widget:
         Whether this `multiple_choice` widget is rendered as a `<select>`
         (`display="dropdown"` in PL) rather than radio buttons. Always `False` for
         other kinds.
-    label : str or None
-        For a fill-in-type kind, the element's `label` text (the
-        `.input-group-text` immediately before the `<input>`), if present. Always
-        `None` for `multiple_choice`/`checkbox`.
-    suffix : str or None
-        For a fill-in-type kind, the element's `suffix` text (the
-        `.input-group-text` immediately after the `<input>`), if present. Always
-        `None` for `multiple_choice`/`checkbox`.
+    label : list[ContentNode] or None
+        For a fill-in-type kind, the element's `label` content (the
+        `.input-group-text` immediately before the `<input>`), if present —
+        real course content has LaTeX math here (e.g. `"pH ="`-style labels
+        with formulas). Always `None` for `multiple_choice`/`checkbox`.
+    suffix : list[ContentNode] or None
+        For a fill-in-type kind, the element's `suffix` content (the
+        `.input-group-text` immediately after the `<input>`), if present.
+        Always `None` for `multiple_choice`/`checkbox`.
     """
 
     kind: str
     name: str
-    options: list[str] = field(default_factory=list)
+    options: list[list[ContentNode]] = field(default_factory=list)
     correct_option_indices: list[int] = field(default_factory=list)
     is_inline: bool = False
     is_dropdown: bool = False
-    label: str | None = None
-    suffix: str | None = None
+    label: list[ContentNode] | None = None
+    suffix: list[ContentNode] | None = None
 
 
 @dataclass(frozen=True)
@@ -168,25 +311,29 @@ class ParsedQuestion:
     ----------
     title : str
         The question's title, from `.question-block h1`.
-    prompt_segments : list[str]
-        The question's prompt text, with each supported input widget's own markup
-        removed, split at each widget's source position. Always has exactly
-        `len(widgets) + 1` entries: `prompt_segments[i]` is the text immediately
-        before `widgets[i]` (for `i < len(widgets)`), and `prompt_segments[-1]` is
-        the trailing text after the last widget (or the whole prompt, if
-        `widgets` is empty). Plain text (HTML stripped) — rich formatting/math is
-        out of scope until Phase 4.
+    prompt_segments : list[list[ContentNode]]
+        The question's prompt content, with each supported input widget's own
+        markup removed, split at each widget's source position. Always has
+        exactly `len(widgets) + 1` entries: `prompt_segments[i]` is the
+        content immediately before `widgets[i]` (for `i < len(widgets)`), and
+        `prompt_segments[-1]` is the trailing content after the last widget
+        (or the whole prompt, if `widgets` is empty). Rich-content node
+        sequences (formatting/images/math preserved) as of Phase 4 increment
+        1 — Phase 2/3 flattened this to plain `str`.
     widgets : list[Widget]
         This question's input-widget groups, in source (DOM) order. Exactly one
         for a simple question; more than one for a compound question.
-    answer_panel_text : str or None
-        The full text content of `.answer-body`, for the whole question (PL's
+    answer_panel_text : list[ContentNode] or None
+        The full rich content of `.answer-body`, for the whole question (PL's
         combined answer panel doesn't mark widget boundaries, so this isn't split
         per-widget). `None` if this page has no answer-key data (i.e. parsed from
         blank/open-instance HTML, where `.answer-body` is present but empty).
         This is the authoritative "what's the correct answer" source — always
         render it in full; each widget's `correct_option_indices` is only an
-        optional enrichment on top.
+        optional enrichment on top. Real answer-panel content in this course
+        carries formatting and math (confirmed by the user), which is exactly
+        why this needs the rich-content treatment rather than staying plain
+        text.
     points : str or None
         The question's point value, as PL displays it (e.g. `"1"`), from
         `#question-score-panel-content`'s `"Value:"`/`"Available points:"`
@@ -215,9 +362,9 @@ class ParsedQuestion:
     """
 
     title: str
-    prompt_segments: list[str]
+    prompt_segments: list[list[ContentNode]]
     widgets: list[Widget]
-    answer_panel_text: str | None
+    answer_panel_text: list[ContentNode] | None
     points: str | None
     points_numeric: float | None
     qid: str | None
@@ -333,6 +480,169 @@ def _strip_help_text(question_body: Tag) -> None:
         tag.decompose()
 
 
+@dataclass(frozen=True)
+class _WidgetMarker:
+    """Internal: a sentinel node marking a widget's position during a content walk.
+
+    Never appears in a `ContentNode` sequence handed to a caller — `_extract_prompt_segments`
+    always splits these out before returning.
+    """
+
+    index: int
+
+
+_BOLD_TAGS = {"strong", "b"}
+_ITALIC_TAGS = {"em", "i"}
+_UNDERLINE_TAGS = {"u"}
+_BLOCK_TAGS = {"p", "li"}
+_SKIP_TAGS = {"script", "style"}
+
+
+def _walk_content(
+    root: Tag, marker_by_id: dict[int, int] | None = None
+) -> list[ContentNode | _WidgetMarker]:
+    """Recursively flatten `root`'s children into an ordered node sequence.
+
+    Parameters
+    ----------
+    root : Tag
+        The element to walk (its own tag is not itself considered - only its
+        descendants).
+    marker_by_id : dict[int, int] or None
+        Maps `id(tag)` (identity, not equality) to a widget index. Any
+        descendant tag whose identity is a key here is replaced with a
+        `_WidgetMarker(index)` leaf instead of being walked into - used by
+        `_extract_prompt_segments` to record each widget's source position
+        without needing a second, string-marker-based pass.
+
+    Returns
+    -------
+    list[ContentNode | _WidgetMarker]
+        Unnormalized - callers must run this through `_normalize_nodes`
+        (and, for prompt splitting, split on `_WidgetMarker`) before use.
+    """
+    nodes: list[ContentNode | _WidgetMarker] = []
+    _walk_into(root, nodes, marker_by_id or {}, bold=False, italic=False, underline=False)
+    return nodes
+
+
+def _walk_into(
+    node, out: list[ContentNode | _WidgetMarker], marker_by_id: dict[int, int],
+    bold: bool, italic: bool, underline: bool,
+) -> None:
+    if isinstance(node, Comment):
+        return
+    if isinstance(node, NavigableString):
+        if str(node):
+            out.append(TextRun(text=str(node), bold=bold, italic=italic, underline=underline))
+        return
+    if not isinstance(node, Tag):
+        return
+
+    marker_index = marker_by_id.get(id(node))
+    if marker_index is not None:
+        out.append(_WidgetMarker(marker_index))
+        return
+
+    name = node.name
+    if name in _SKIP_TAGS:
+        return
+    if name == "img":
+        out.append(ImageRef(local_path=node.get("src", ""), alt=node.get("alt", "")))
+        return
+    if name == "br":
+        out.append(ParagraphBreak())
+        return
+
+    is_block = name in _BLOCK_TAGS
+    if is_block and out:
+        out.append(ParagraphBreak())
+    if name == "li":
+        out.append(ListItemStart())
+
+    child_bold = bold or name in _BOLD_TAGS
+    child_italic = italic or name in _ITALIC_TAGS
+    child_underline = underline or name in _UNDERLINE_TAGS
+    for child in node.children:
+        _walk_into(child, out, marker_by_id, child_bold, child_italic, child_underline)
+
+    if is_block:
+        out.append(ParagraphBreak())
+
+
+def _normalize_nodes(nodes: list[ContentNode | _WidgetMarker]) -> list[ContentNode | _WidgetMarker]:
+    """Collapse whitespace and redundant structure in a raw `_walk_content` output.
+
+    - Adjacent `TextRun`s with identical formatting are merged by direct
+      concatenation - each already carries its own real whitespace from the
+      source HTML, so no separator is synthesized between them.
+    - Interior whitespace in each `TextRun`'s text is collapsed to a single
+      space each; genuinely empty (not just whitespace-only) runs are dropped.
+      Whitespace-only runs are kept as single-space separators at this stage -
+      see the trimming pass below for why.
+    - Consecutive `ParagraphBreak`s collapse to one.
+    - Leading/trailing `ParagraphBreak`/`ListItemStart`/whitespace-only-`TextRun`
+      nodes are stripped from both ends, and the first/last remaining
+      `TextRun`'s own leading/trailing whitespace is stripped - this is what
+      lets `_WidgetMarker`-adjacent segments end up with clean boundaries
+      without needing a separate `.strip()` step per segment.
+    """
+    merged: list[ContentNode | _WidgetMarker] = []
+    for node in nodes:
+        if isinstance(node, TextRun):
+            if (
+                merged
+                and isinstance(merged[-1], TextRun)
+                and (merged[-1].bold, merged[-1].italic, merged[-1].underline)
+                == (node.bold, node.italic, node.underline)
+            ):
+                prev = merged[-1]
+                merged[-1] = TextRun(prev.text + node.text, prev.bold, prev.italic, prev.underline)
+            else:
+                merged.append(node)
+        elif isinstance(node, ParagraphBreak):
+            if merged and isinstance(merged[-1], ParagraphBreak):
+                continue
+            merged.append(node)
+        else:
+            merged.append(node)
+
+    cleaned: list[ContentNode | _WidgetMarker] = []
+    for node in merged:
+        if isinstance(node, TextRun):
+            text = re.sub(r"\s+", " ", node.text)
+            if text == "":
+                continue
+            cleaned.append(TextRun(text, node.bold, node.italic, node.underline))
+        else:
+            cleaned.append(node)
+
+    def _is_boundary_junk(n) -> bool:
+        return isinstance(n, (ParagraphBreak, ListItemStart)) or (
+            isinstance(n, TextRun) and n.text.strip() == ""
+        )
+
+    while cleaned and _is_boundary_junk(cleaned[0]):
+        cleaned.pop(0)
+    while cleaned and _is_boundary_junk(cleaned[-1]):
+        cleaned.pop()
+
+    if cleaned and isinstance(cleaned[0], TextRun):
+        first = cleaned[0]
+        cleaned[0] = TextRun(first.text.lstrip(), first.bold, first.italic, first.underline)
+    if cleaned and isinstance(cleaned[-1], TextRun):
+        last = cleaned[-1]
+        cleaned[-1] = TextRun(last.text.rstrip(), last.bold, last.italic, last.underline)
+
+    return cleaned
+
+
+def _rich_from_html_fragment(fragment: str) -> list[ContentNode]:
+    """Parse a standalone HTML string (e.g. an attribute value) into node content."""
+    frag_soup = BeautifulSoup(fragment, "html.parser")
+    return _normalize_nodes(_walk_content(frag_soup))  # type: ignore[return-value]
+
+
 @dataclass
 class _WidgetGroup:
     """Internal: one widget's raw containers, before building its `Widget`."""
@@ -427,7 +737,7 @@ def _build_widget(group: _WidgetGroup, answer_body: Tag | None) -> Widget:
     return Widget(kind=group.kind, name=group.name, label=label, suffix=suffix)
 
 
-def _extract_group_options(group: _WidgetGroup) -> list[str]:
+def _extract_group_options(group: _WidgetGroup) -> list[list[ContentNode]]:
     if group.is_dropdown:
         options = []
         for option in group.containers[0].find_all("option"):
@@ -435,14 +745,17 @@ def _extract_group_options(group: _WidgetGroup) -> list[str]:
                 continue  # the blank placeholder option
             content = option.get("data-content", "")
             content = re.sub(r"^\([A-Za-z0-9]+\)\s*", "", content).strip()
-            options.append(content or option.get_text(strip=True))
+            nodes = _rich_from_html_fragment(content) if content else _normalize_nodes(
+                _walk_content(option)  # type: ignore[arg-type]
+            )
+            options.append(nodes)
         return options
 
     options = []
     for container in group.containers:
         answer = container.find(class_=["pl-multiple-choice-answer", "pl-checkbox-answer"])
         if answer is not None:
-            options.append(answer.get_text(strip=True))
+            options.append(_normalize_nodes(_walk_content(answer)))  # type: ignore[arg-type]
     return options
 
 
@@ -454,24 +767,26 @@ def _extract_group_is_inline(group: _WidgetGroup) -> bool:
     return "form-check-inline" in classes
 
 
-def _extract_group_label_suffix(group: _WidgetGroup) -> tuple[str | None, str | None]:
+def _extract_group_label_suffix(
+    group: _WidgetGroup,
+) -> tuple[list[ContentNode] | None, list[ContentNode] | None]:
     container = group.containers[0]
     input_tag = container.find(attrs={"name": group.name})
     if input_tag is None:
         return None, None
 
     texts = container.find_all(class_="input-group-text")
-    label = None
-    suffix = None
+    label: list[ContentNode] | None = None
+    suffix: list[ContentNode] | None = None
     for text_tag in texts:
-        text = text_tag.get_text(strip=True)
-        if not text:
+        nodes = _normalize_nodes(_walk_content(text_tag))  # type: ignore[arg-type]
+        if not nodes:
             continue
         if _precedes(text_tag, input_tag):
             if label is None:
-                label = text
+                label = nodes
         else:
-            suffix = text  # last trailing one wins
+            suffix = nodes  # last trailing one wins
     return label, suffix
 
 
@@ -482,7 +797,9 @@ def _precedes(tag: Tag, other: Tag) -> bool:
     return False
 
 
-def _extract_correct_option_indices(answer_body: Tag | None, options: list[str]) -> list[int]:
+def _extract_correct_option_indices(
+    answer_body: Tag | None, options: list[list[ContentNode]]
+) -> list[int]:
     """Best-effort match of `.answer-body`'s `<li>` items back to `options`.
 
     Returns an empty list whenever nothing matches — e.g. a question whose
@@ -490,6 +807,10 @@ def _extract_correct_option_indices(answer_body: Tag | None, options: list[str])
     default `<li>(key) option text</li>` list (see module docstring on
     `pl-hide-in-panel`). Not matching is expected/normal, not an error:
     `answer_panel_text` remains the authoritative answer regardless.
+
+    Matches on `plain_text(option)` (formatting/math stripped) — this is a
+    coarse text-containment check, not aiming to preserve rich content, so
+    flattening both sides first keeps it simple.
     """
     if answer_body is None:
         return []
@@ -497,7 +818,8 @@ def _extract_correct_option_indices(answer_body: Tag | None, options: list[str])
     for li in answer_body.find_all("li"):
         li_text = li.get_text(strip=True)
         for idx, option in enumerate(options):
-            if option and option in li_text and idx not in indices:
+            option_text = plain_text(option)
+            if option_text and option_text in li_text and idx not in indices:
                 indices.append(idx)
                 break
     return indices
@@ -505,42 +827,47 @@ def _extract_correct_option_indices(answer_body: Tag | None, options: list[str])
 
 def _extract_prompt_segments(
     question_body: Tag, groups: list[_WidgetGroup], additional_fill_in_tags: Iterable[str] = ()
-) -> list[str]:
-    """Split the prompt's flattened text at each widget's source position.
+) -> list[list[ContentNode]]:
+    """Split the prompt's rich content at each widget's source position.
 
     Re-runs widget detection on a fresh copy of `question_body` (rather than
-    mutating the tree used for the rest of parsing) so this can safely replace
-    each widget's first container with a placeholder and remove the rest, then
-    split the resulting flattened text on those placeholders. Detection is a pure
-    function of the HTML (given the same `additional_fill_in_tags`), so
+    mutating the tree used for the rest of parsing) so this can safely walk
+    around each widget's first container (replacing it with a `_WidgetMarker`
+    node instead of descending into it) and skip the rest. Detection is a
+    pure function of the HTML (given the same `additional_fill_in_tags`), so
     `_find_widget_groups` on the copy produces groups in the same order/count as
     `groups` — this is an internal invariant of this module, not something calling
     code needs to reason about.
     """
     if not groups:
-        text = question_body.get_text(separator=" ", strip=False)
-        return [re.sub(r"\s+", " ", text).strip()]
+        return [_normalize_nodes(_walk_content(question_body))]  # type: ignore[list-item]
 
     body_copy = BeautifulSoup(str(question_body), "html.parser")
     copy_groups = _find_widget_groups(body_copy, additional_fill_in_tags)
 
-    marker = "\x00"
-    for copy_group in copy_groups:
-        copy_group.containers[0].replace_with(NavigableString(marker))
+    marker_by_id: dict[int, int] = {}
+    for idx, copy_group in enumerate(copy_groups):
+        marker_by_id[id(copy_group.containers[0])] = idx
         for extra in copy_group.containers[1:]:
             extra.decompose()
 
-    text = body_copy.get_text(separator=" ", strip=False)
-    parts = text.split(marker)
-    return [re.sub(r"\s+", " ", part).strip() for part in parts]
+    nodes = _normalize_nodes(_walk_content(body_copy, marker_by_id))
+
+    segments: list[list[ContentNode]] = [[] for _ in range(len(groups) + 1)]
+    seg_idx = 0
+    for node in nodes:
+        if isinstance(node, _WidgetMarker):
+            seg_idx = node.index + 1
+            continue
+        segments[seg_idx].append(node)  # type: ignore[arg-type]
+    return [_normalize_nodes(seg) for seg in segments]  # type: ignore[misc]
 
 
-def _extract_answer_panel_text(answer_body: Tag | None) -> str | None:
+def _extract_answer_panel_text(answer_body: Tag | None) -> list[ContentNode] | None:
     if answer_body is None:
         return None
-    text = answer_body.get_text(separator=" ", strip=True)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text or None
+    nodes = _normalize_nodes(_walk_content(answer_body))  # type: ignore[arg-type]
+    return nodes or None
 
 
 _POINTS_ROW_LABELS = {"Value:", "Available points:"}
