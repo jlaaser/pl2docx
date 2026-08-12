@@ -16,3 +16,8 @@ n_instances: 3
 # Directory (relative to the repo root, unless absolute) where fetched
 # blank/key HTML is saved, one subfolder per assessment_instance_id.
 output_dir: "output"
+
+# Path to the instructor-supplied docx template used when rendering. Generate a
+# starting point with `pl2docx-starter-template` (python -m pl2docx.starter_template),
+# then customize its styles/layout in Word.
+template_path: "template.docx"

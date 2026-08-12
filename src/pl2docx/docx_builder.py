@@ -1,91 +1,106 @@
-"""Render parsed questions into a Word document via an instructor template.
+"""Assemble a zones/questions Jinja context and render it via an instructor template.
 
-Follows CLAUDE.md's "purpose-built conversion layer" direction: all
-per-element formatting logic lives here in Python, and the instructor's
-template docx only needs a single ``{{p content }}`` placeholder — the
-`docxtpl` subdocument this module builds gets inserted there. Formatting is
-currently fixed per element kind (lettered options, blank fill-in lines);
-run-time-configurable formatting is Phase 3's job, not this one's.
+Phase 3 architecture: document layout (the zone/question loop, headers, named
+styles) lives in the instructor's docx template — see `pl2docx.starter_template`
+for a generated starting point. This module's job is just to open that template,
+build the `zones` context it expects (delegating each question's actual content —
+the three `Subdoc`s — to `pl2docx.element_renderer`), render, and save. It does no
+per-element formatting itself; that split between "layout" and "content" is
+deliberate (see CLAUDE.md's Architecture section).
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TypedDict
 
+from docx.opc.exceptions import PackageNotFoundError
 from docxtpl import DocxTemplate
 
-from pl2docx.html_parser import ParsedQuestion, option_letter
+from pl2docx.element_renderer import build_question_context
+from pl2docx.html_parser import ParsedQuestion
 
 
-def build_document(template_path: Path, questions: list[ParsedQuestion], output_path: Path) -> None:
-    """Render `questions` into a docx built from `template_path`.
+class ZoneQuestions(TypedDict):
+    """One zone's title and its `(ParsedQuestion, document-wide number)` pairs."""
+
+    title: str | None
+    questions: list[tuple[ParsedQuestion, int]]
+
+
+class TemplateUnreadableError(RuntimeError):
+    """Raised when the template docx can't be opened as a valid docx package.
+
+    Usually means the file is currently open in Word (which can make it
+    unreadable as a valid zip to another process at that instant) or is
+    still mid-sync with a cloud-storage provider (e.g. OneDrive) right
+    after being saved — not a corrupted template. Close the file in Word
+    and let any sync finish, then retry.
+    """
+
+
+def render_document(
+    template_path: Path,
+    zones: list[ZoneQuestions],
+    is_answer_key: bool,
+    output_path: Path,
+) -> None:
+    """Render `zones` into a docx built from `template_path`.
 
     Parameters
     ----------
     template_path : pathlib.Path
-        Path to a docx template containing a `{{ content }}` Jinja
-        placeholder (an instructor-supplied template with instructions/
-        reference material, or a minimal stand-in for testing).
-    questions : list[ParsedQuestion]
-        Questions to render, in the order they should appear. Each is
-        rendered as a heading, a "Value: " line (if `points` is set), its
-        prompt text, and a kind-specific answer area: lettered options
-        (bolding the correct one(s), if `correct_option_indices` is
-        non-empty) for `multiple_choice`/`checkbox`; an "Answer: " line
-        (blank, or filled in if `answer_panel_text` is set) for
-        `string_input`/`integer_input`. Whenever `answer_panel_text` is set,
-        its full text is also always shown as a "Correct answer: " line —
-        for `multiple_choice`/`checkbox` this is in *addition* to any
-        bolding, never a substitute for it (bolding isn't guaranteed to
-        match — see `pl2docx.html_parser`'s module docstring on
-        `pl-hide-in-panel`).
+        Instructor-supplied docx template. Must define, at minimum, a
+        `{% for zone in zones %}` / `{% for question in zone.questions %}`
+        loop consuming the context shape this function builds (see
+        `pl2docx.element_renderer.build_question_context` for the
+        per-question fields), plus a reference to the top-level
+        `is_answer_key` variable if the template wants to branch on it
+        (e.g. to choose between a question's `answer_contents` and
+        `answer_space`). See `pl2docx.starter_template` for a generated
+        example that does exactly this.
+    zones : list[ZoneQuestions]
+        Zones in document order, each holding its questions paired with
+        their already-assigned document-wide `number`.
+    is_answer_key : bool
+        Whether this render pass is the answer key or the blank copy.
+        Exposed to the template as a top-level `is_answer_key` variable;
+        this function doesn't otherwise interpret the flag — whether/how a
+        question's answer data actually differs between passes is
+        entirely a function of which `ParsedQuestion`s were passed in
+        (blank-parse vs. key-parse), same as Phase 2.
     output_path : pathlib.Path
         Where to save the resulting docx. Parent directories are created if
         needed.
 
-    Notes
-    -----
-    Whether this produces a "blank" or "key" document is entirely a
-    function of the input `ParsedQuestion`s' answer data (empty vs.
-    populated) — this function itself has no separate blank/key mode.
+    Raises
+    ------
+    TemplateUnreadableError
+        If `template_path` can't be opened as a valid docx package — most
+        often because it's currently open in Word, or a cloud-storage sync
+        (e.g. OneDrive) hasn't finished writing it yet after a save.
     """
-    doc = DocxTemplate(str(template_path))
-    subdoc = doc.new_subdoc()
+    tpl = DocxTemplate(str(template_path))
+    try:
+        tpl.init_docx()
+    except PackageNotFoundError as exc:
+        raise TemplateUnreadableError(
+            f"Could not open template at {template_path} as a docx file. This "
+            "usually means it's currently open in Word, or a cloud-sync tool "
+            "(e.g. OneDrive) hasn't finished saving it yet — close it in Word "
+            "and wait a moment for syncing to finish, then try again."
+        ) from exc
 
-    for question in questions:
-        subdoc.add_heading(question.title, level=2)
-        if question.points is not None:
-            subdoc.add_paragraph(f"Value: {question.points}").runs[0].italic = True
-        if question.prompt_text:
-            subdoc.add_paragraph(question.prompt_text)
+    zones_context = [
+        {
+            "title": zone["title"],
+            "questions": [
+                build_question_context(tpl, question, number) for question, number in zone["questions"]
+            ],
+        }
+        for zone in zones
+    ]
 
-        if question.kind in ("multiple_choice", "checkbox"):
-            _add_options(subdoc, question)
-        else:
-            _add_fill_in(subdoc, question)
-
-    doc.render({"content": subdoc})
+    tpl.render({"zones": zones_context, "is_answer_key": is_answer_key})
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    doc.save(str(output_path))
-
-
-def _add_options(subdoc, question: ParsedQuestion) -> None:
-    for idx, option_text in enumerate(question.options):
-        paragraph = subdoc.add_paragraph()
-        run = paragraph.add_run(f"({option_letter(idx)}) {option_text}")
-        if idx in question.correct_option_indices:
-            run.bold = True
-    # Always show the real answer-panel text, in addition to (never instead
-    # of) any bolding above — bolding is best-effort and can miss (e.g.
-    # pl-hide-in-panel-suppressed answer lists with custom explanations).
-    if question.answer_panel_text is not None:
-        paragraph = subdoc.add_paragraph()
-        run = paragraph.add_run(f"Correct answer: {question.answer_panel_text}")
-        run.italic = True
-
-
-def _add_fill_in(subdoc, question: ParsedQuestion) -> None:
-    if question.answer_panel_text is not None:
-        subdoc.add_paragraph(f"Answer: {question.answer_panel_text}")
-    else:
-        subdoc.add_paragraph("Answer: " + "_" * 20)
+    tpl.save(str(output_path))

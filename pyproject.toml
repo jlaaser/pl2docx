@@ -19,6 +19,7 @@ dependencies = [
 [project.scripts]
 pl2docx-fetch = "pl2docx.fetch:main"
 pl2docx-render = "pl2docx.render:main"
+pl2docx-starter-template = "pl2docx.starter_template:main"
 
 [build-system]
 requires = ["uv_build>=0.12.3,<0.13.0"]

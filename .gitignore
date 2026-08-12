@@ -11,3 +11,11 @@ config.yaml
 
 # raw HTML fetched from the local PL server during Phase 1 development
 output/
+
+# generated instructor template (run `pl2docx-starter-template` to create your own,
+# real-world-usage default location per config.example.yaml's template_path)
+template.docx
+
+# real course assessment PDFs kept locally as formatting reference examples -
+# not this tool's content, don't belong in a publicly-distributable repo
+planning_notes/reference_examples/

@@ -25,6 +25,11 @@ class Config:
         Number of instances to generate when running the fetch script.
     output_dir : pathlib.Path
         Directory under which fetched HTML for each instance is saved.
+    template_path : pathlib.Path
+        Path to the instructor-supplied docx template used when rendering.
+        Existence isn't checked here — only when actually opened for
+        rendering — matching how other paths in this config aren't
+        pre-validated at load time.
 
     Notes
     -----
@@ -39,6 +44,7 @@ class Config:
     assessment_id: int
     n_instances: int
     output_dir: Path
+    template_path: Path
 
 
 def load_config(path: str | Path) -> Config:
@@ -81,4 +87,5 @@ def load_config(path: str | Path) -> Config:
         assessment_id=int(raw["assessment_id"]),
         n_instances=int(raw.get("n_instances", 1)),
         output_dir=Path(raw.get("output_dir", "output")),
+        template_path=Path(raw.get("template_path", "template.docx")),
     )

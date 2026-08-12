@@ -86,6 +86,19 @@ class ParsedQuestion:
         The question's point value, as PL displays it (e.g. `"1"`), from
         `#question-score-panel-content`'s `"Value:"`/`"Available points:"`
         row. `None` if that table/row isn't present in the fetched page.
+    points_numeric : float or None
+        Best-effort `float()` parse of `points`. `None` if `points` is
+        `None` or isn't a plain number (e.g. an unusual partial-credit
+        display) — callers needing a display string should fall back to
+        `points` verbatim in that case, not assume `points_numeric` parses.
+    qid : str or None
+        The question's real qid/directory path (e.g.
+        `"TEST/pl-integer-input"`), from the page's "Staff information"
+        panel. This panel is gated only on the viewer having course-staff
+        role — which this tool always does — not on assessment type, so
+        it's present regardless of whether the question's *title* is shown
+        to real students (Exam-type assessments can hide titles; the qid is
+        still there). `None` if that panel wasn't found on the page.
 
     Notes
     -----
@@ -103,6 +116,8 @@ class ParsedQuestion:
     correct_option_indices: list[int]
     answer_panel_text: str | None
     points: str | None
+    points_numeric: float | None
+    qid: str | None
 
 
 def parse_instance_question_html(html: str) -> ParsedQuestion:
@@ -144,6 +159,8 @@ def parse_instance_question_html(html: str) -> ParsedQuestion:
     answer_body = soup.find(class_="answer-body")
     answer_panel_text = _extract_answer_panel_text(answer_body)
     points = _extract_points(soup)
+    points_numeric = _parse_points_numeric(points)
+    qid = _extract_qid(soup)
 
     kind = _detect_kind(question_body)
 
@@ -160,6 +177,8 @@ def parse_instance_question_html(html: str) -> ParsedQuestion:
             correct_option_indices=correct_option_indices,
             answer_panel_text=answer_panel_text,
             points=points,
+            points_numeric=points_numeric,
+            qid=qid,
         )
 
     return ParsedQuestion(
@@ -170,6 +189,8 @@ def parse_instance_question_html(html: str) -> ParsedQuestion:
         correct_option_indices=[],
         answer_panel_text=answer_panel_text,
         points=points,
+        points_numeric=points_numeric,
+        qid=qid,
     )
 
 
@@ -269,6 +290,61 @@ def _extract_points(soup: BeautifulSoup) -> str | None:
             text = re.sub(r"\s+", " ", text).strip()
             return text or None
     return None
+
+
+def _parse_points_numeric(points: str | None) -> float | None:
+    if points is None:
+        return None
+    try:
+        return float(points)
+    except ValueError:
+        return None
+
+
+def _extract_qid(soup: BeautifulSoup) -> str | None:
+    """Extract the real qid from the page's "Staff information" panel.
+
+    Confirmed real markup: a `<div>QID:</div>` immediately followed by a
+    sibling `<div>` containing the qid (usually as an `<a>` link's text,
+    e.g. `intro/practice/matter-classification`). This panel is present
+    whenever the viewer has course-staff role, independent of the
+    assessment's title-display settings.
+    """
+    label = soup.find(lambda tag: tag.name is not None and tag.get_text(strip=True) == "QID:")
+    if label is None:
+        return None
+    value_tag = label.find_next_sibling()
+    if value_tag is None:
+        return None
+    text = value_tag.get_text(strip=True)
+    return text or None
+
+
+def format_points_text(points_numeric: float | None, points_raw: str | None) -> str | None:
+    """Format a question's point value as display text, e.g. "1 point"/"2 points".
+
+    Parameters
+    ----------
+    points_numeric : float or None
+        A `ParsedQuestion.points_numeric` value.
+    points_raw : str or None
+        The corresponding `ParsedQuestion.points` (raw scraped text), used
+        as a fallback when `points_numeric` couldn't be parsed.
+
+    Returns
+    -------
+    str or None
+        `None` if both inputs are `None`. If `points_numeric` parsed
+        cleanly, a pluralized `"N point(s)"` string (integer values render
+        without a decimal, e.g. `"2 points"` not `"2.0 points"`). Otherwise
+        `points_raw` verbatim (no "points" suffix appended, since its shape
+        isn't known).
+    """
+    if points_numeric is None:
+        return points_raw
+    value = int(points_numeric) if points_numeric == int(points_numeric) else points_numeric
+    unit = "point" if value == 1 else "points"
+    return f"{value} {unit}"
 
 
 def option_letter(index: int) -> str:

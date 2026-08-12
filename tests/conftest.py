@@ -1,21 +1,17 @@
 import pytest
-from docx import Document
+
+from pl2docx.starter_template import build_starter_template
 
 
 @pytest.fixture
-def minimal_template(tmp_path):
-    """A minimal docx template with a single `{{p content }}` placeholder.
-
-    The `p` prefix is docxtpl's required syntax for paragraph-level
-    subdocument insertion (plain `{{ content }}` embeds the subdocument's
-    raw XML as literal text inside the placeholder's own run instead of
-    splicing in real paragraphs — confirmed by testing both forms).
+def starter_template(tmp_path):
+    """A real generated pl2docx starter template (see `pl2docx.starter_template`).
 
     Generated at test time (docx is a binary format, not something to hand-author
-    as a checked-in text fixture) rather than committed to the repo.
+    as a checked-in text fixture) rather than committed to the repo. Using the
+    actual generator here (rather than a hand-rolled minimal stand-in) keeps tests
+    exercising the same template shape real usage does.
     """
-    doc = Document()
-    doc.add_paragraph("{{p content }}")
-    path = tmp_path / "template_minimal.docx"
-    doc.save(str(path))
+    path = tmp_path / "template.docx"
+    build_starter_template(path)
     return path

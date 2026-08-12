@@ -52,7 +52,8 @@ Current structure:
 ├── .git/                          # Git repository for pl2docx project
 ├── planning_notes/                # notes about architecture decisions, etc
 ├── src/pl2docx/                   # package source (uv src layout)
-│   ├── config.py                  # Config dataclass + load_config() (reads config.yaml)
+│   ├── config.py                  # Config dataclass + load_config() (reads config.yaml,
+│   │                               #   incl. template_path)
 │   ├── csrf.py                    # extract_csrf_token() - scrape PL's per-request CSRF token
 │   ├── pl_client.py               # PLClient - drives the real PL server (auth, effective-user,
 │   │                               #   instance create/regenerate, blank/key HTML fetch,
@@ -64,19 +65,34 @@ Current structure:
 │   │                               #   and writes structure.json (zone titles + question order/ids)
 │   ├── html_parser.py             # parse_instance_question_html() -> ParsedQuestion; supports
 │   │                               #   pl-multiple-choice/checkbox/string-input/integer-input only
-│   │                               #   (Phase 2) - raises UnsupportedElementError for anything else,
-│   │                               #   compound multi-widget questions, or unrecognized answer-key shapes
-│   ├── docx_builder.py            # build_document() - ParsedQuestions -> docx via docxtpl subdoc;
-│   │                               #   template needs a `{{p content }}` placeholder (see note below)
+│   │                               #   (Phase 2/3) - raises UnsupportedElementError for anything
+│   │                               #   else or compound multi-widget questions (Phase 3B territory);
+│   │                               #   also extracts qid (Staff info panel) and points_numeric
+│   ├── element_renderer.py        # build_question_context() - one ParsedQuestion -> the 3 Subdocs
+│   │                               #   (question_contents/answer_contents/answer_space) + qid/points
+│   │                               #   a question's Jinja context needs. Phase 3A: fixed formatting
+│   │                               #   (Phase 2-equivalent); Phase 3B adds config-driven list-style/
+│   │                               #   display/fill-in-format choices and compound-widget support.
+│   ├── docx_builder.py            # render_document() - assembles the zones/questions context and
+│   │                               #   calls docxtpl render/save; does NO per-element formatting
+│   │                               #   itself (see element_renderer.py) - document *layout* lives in
+│   │                               #   the instructor's template (loop tags + named styles), not here
+│   ├── starter_template.py        # build_starter_template() - CLI (`pl2docx-starter-template`)
+│   │                               #   generates an editable example instructor template (zones/
+│   │                               #   questions loop + named "pl2docx ..." styles), via python-docx
+│   │                               #   (not committed as a binary - same reasoning as test fixtures)
 │   └── render.py                  # CLI entry point (python -m pl2docx.render / `pl2docx-render`) -
-│                                   #   renders one fetch.py output/<instance>/ dir into blank+key docx
+│                                   #   renders one fetch.py output/<instance>/ dir (using its
+│                                   #   structure.json for zone/question order) into blank+key docx
 ├── tests/
-│   ├── conftest.py                          # minimal_template fixture (generated at test time)
+│   ├── conftest.py                          # starter_template fixture (generated at test time,
+│   │                                         #   via the real build_starter_template())
 │   ├── fixtures/instance_question/          # synthetic (not real course content) sample HTML,
 │   │                                         #   one blank+key pair per Phase 2 element kind
 │   ├── test_csrf.py                         # unit tests, no live server needed
 │   ├── test_html_parser.py                  # unit tests, no live server needed
 │   ├── test_docx_builder.py                 # unit tests, no live server needed
+│   ├── test_starter_template.py             # unit tests, no live server needed
 │   ├── test_pl_client.py                    # unit tests for parse_zone_groups(), no live server needed
 │   ├── test_fetch.py                        # unit tests for image download/rewrite, no live server needed
 │   └── test_pl_client_integration.py        # full flow against the real local server;
@@ -89,11 +105,55 @@ Current structure:
                                     #   downloaded images), and structure.json (zone/question layout)
 ```
 
-**docxtpl gotcha**: inserting a `docxtpl.Subdoc` (from `doc.new_subdoc()`) requires the
-template placeholder to be `{{p content }}` — the `p` prefix is docxtpl's paragraph-level
-substitution syntax. Plain `{{ content }}` silently produces a broken docx (the subdoc's
-raw XML ends up as literal text inside the placeholder's own run, invisible to
-`python-docx`'s normal readers) — confirmed by testing both forms while building Phase 2.
+**docxtpl gotchas** (all confirmed this project, not guessed):
+- Inserting a `docxtpl.Subdoc` (from `doc.new_subdoc()`) requires the template tag to be
+  `{{p content }}` — the `p` prefix is docxtpl's paragraph-level substitution syntax.
+  Plain `{{ content }}` silently produces a broken docx (the subdoc's raw XML ends up as
+  literal text inside the placeholder's own run, invisible to `python-docx`'s normal
+  readers).
+  - **Mechanism** (`docxtpl/template.py`'s `patch_xml`, the `for y in ["tr","tc","p","r"]`
+    loop): before Jinja ever sees the document, a regex finds the *entire* `<w:p>...</w:p>`
+    containing a `{%p `/`{{p ` (or `tr`/`tc`/`r`) tag and replaces the **whole paragraph
+    element** with the bare `{% %}`/`{{ }}` tag text (no `<w:p>` wrapper at all) — that's
+    how the substituted subdoc's own `<w:p>` fragments end up as real sibling paragraphs
+    instead of nested inside a run's `<w:t>`.
+  - **Corollary**: this means `{{p content }}` must be **completely alone** in its
+    paragraph — not just other prose, but *any other Jinja tag too* (e.g.
+    `{% endif %}{{p content }}` in one paragraph). The regex still matches and still
+    replaces the whole paragraph, so the other tag's text is silently deleted as
+    collateral damage — not an error at the deletion point, but it breaks that tag's
+    open/close pairing, surfacing later as a confusing unrelated error (e.g. Jinja
+    reporting an unexpected `endfor` while still expecting `endif`, from an `{% if %}`
+    two paragraphs earlier that just lost its matching `{% endif %}`).
+- A `{% if %}`/`{% endif %}` (or `{% for %}`/`{% endfor %}`) must each be **on their own
+  paragraph** to cleanly omit/repeat a whole paragraph — wrapping just the printed value
+  inline (e.g. `{% if x %}{{ x }}{% endif %}` in one paragraph) still leaves an empty,
+  styled paragraph behind when the condition is false.
+  - **To eliminate that blank paragraph** (distinct from the corollary above — this is
+    about *merging* a control tag's paragraph into its neighbor, not combining it with
+    another tag): use Jinja's whitespace-trim syntax, `{%- if x -%}`/`{%- endif %}` —
+    docxtpl explicitly supports this (dedicated regexes in `patch_xml` merge the
+    `<w:t>` before a leading `{%-` and after a trailing `-%}` into the adjacent
+    paragraph). Confirmed caveat: the merge keeps only *one* paragraph's style (the
+    surviving/absorbing paragraph's), so content that was on its own differently-styled
+    paragraph loses that distinct styling once merged in — a real trade-off between
+    "no blank line" and "independently stylable", not a free win.
+- Never describe `{{ }}`/`{% %}` tag syntax in plain instructional text placed *inside*
+  a template docx — docxtpl parses the entire document as Jinja source, so even prose
+  like "edit the `{% for %}` tags below" breaks compilation. (Hit this authoring
+  `starter_template.py`'s own instructions paragraph.)
+- A **paragraph border** applied to a `{{p ... }}` line is silently discarded — same root
+  cause as the corollary above (the whole paragraph, `<w:pPr>` and all, gets replaced by
+  the substituted subdoc content). Use a **table cell border** instead (1x1 table, border
+  on the cell via `<w:tcBorders>`): a cell's border isn't paragraph-level, so it survives
+  and correctly wraps the substituted content regardless of how many paragraphs it expands
+  into. `starter_template.py`'s `_add_bordered_solution_box()` does this for the answer key
+  "SOLUTION:" box.
+- If the template docx is open in Word (or a cloud-sync tool like OneDrive hasn't finished
+  writing it after a save) when `render_document()` runs, `python-docx` raises a cryptic
+  `PackageNotFoundError` deep inside `docxtpl`'s subdoc creation. `docx_builder.py` now
+  catches this and re-raises as `TemplateUnreadableError` with an actionable message —
+  close the file in Word and let syncing finish, then retry.
 
 Update this repository structure description as needed when significant changes are made to the folder structure or organization of files.
 
@@ -132,19 +192,38 @@ Update this repository structure description as needed when significant changes 
      parse embedded `layout_json` straight out of fetched HTML, render locally as SVG.
    - Core/third-party fabric.js elements (e.g. `pl-drawing`): headless-browser fallback —
      load question, wait for fabric init, call `canvas.toSVG()` directly.
-5. **HTML → Word** — purpose-built conversion layer (not generic pandoc), with
-   run-time-configurable formatting per element type (e.g. MC as lettered list vs.
-   fillable bubbles). Math via LaTeX → OMML. Template merge via **docxtpl**
-   (`html_parser.py` + `docx_builder.py`, see Repository structure above).
-   **Phase 2 status**: implemented for `pl-multiple-choice`/`pl-checkbox`/
-   `pl-string-input`/`pl-integer-input` only, with fixed (not yet configurable —
-   Phase 3) rendering, plain-text prompts (no math/rich HTML — Phase 4). Verified
-   against real fetched content that some real questions fall outside this: (a)
-   questions with custom-authored per-choice answer *explanations* instead of PL's
-   default `<ul><li>` correct-answer list, and (b) compound questions embedding more
-   than one input widget (e.g. a radio group *and* a text box on one page). Both
-   raise `UnsupportedElementError` rather than silently mis-rendering; widening
-   support for either is unscoped future work, not a Phase 2 bug.
+5. **HTML → Word** — purpose-built conversion layer (not generic pandoc). **Phase 3
+   architecture**: document *layout* (zone/question loop, headers, page structure,
+   named Word styles for appearance) lives in the instructor's own docx template,
+   authored/edited in Word; all *content* (per-element formatting, matching/bolding,
+   eventually math/rich-HTML) is built in Python and handed to the template as
+   `docxtpl.Subdoc`s per question. This split was chosen over generating the whole
+   document in Python (Phase 2's approach) specifically so instructors can restyle
+   fonts/colors/spacing/borders and rearrange document sections themselves, without a
+   pl2docx code change for every cosmetic preference — see
+   `planning_notes/2026-08-10 phased implementation roadmap.md`'s Phase 3 note and this
+   session's spike (throwaway, confirmed: per-iteration subdocs in a `{% for %}` loop
+   don't cross-contaminate; named styles defined in the template are correctly picked
+   up by Python-built subdoc content).
+   - `element_renderer.py` builds each question's 3 subdocs
+     (`question_contents`/`answer_contents`/`answer_space`) plus its `qid`/
+     `points_numeric`/`points_text`. **Phase 3A status**: fixed formatting, equivalent
+     in substance to Phase 2's old behavior. **Phase 3B** (not yet implemented) adds
+     `config.yaml`-driven per-element-type formatting (list style: letter-labels/
+     bubble/checkbox; block vs. inline; bold-correct; fill-in blank format) and
+     best-effort compound-multi-widget-question support.
+   - `docx_builder.py`'s `render_document()` assembles the `zones` context and calls
+     `docxtpl`'s render/save — no per-element formatting decisions of its own.
+   - `starter_template.py` generates an example instructor template exercising the
+     full context shape (zone titles, question number/title/points/qid, the three
+     subdoc insertions, an `is_answer_key` branch) with named "pl2docx ..." styles
+     ready to restyle in Word.
+   - Math/rich-HTML prompt formatting and image embedding remain Phase 4 (raw LaTeX
+     and dropped images are still visible in current output — known, not a bug).
+   - Compound questions (multiple input widgets on one page, e.g.
+     `physical-or-chemical`'s 3 dropdown sub-statements, `previous-experience`'s radio
+     group + text box) still raise `UnsupportedElementError` — Phase 3B's scope, not
+     yet implemented.
 
 ## Extensibility
 
@@ -223,17 +302,18 @@ def hund_violations(system: OrbitalSystem) -> list[EnergyLevel]:
 - **Compound questions with multiple named input widgets on one page** (confirmed real
   content: `physical-or-chemical`'s 3 separate `pl-multiple-choice` dropdown
   sub-statements; `previous-experience`'s radio group + text box). Currently rejected by
-  `html_parser.py` (`UnsupportedElementError`) rather than mis-rendered — needs
-  `ParsedQuestion` reworked to hold multiple named sub-answers per question. Deferred to
-  a later phase per explicit user direction (2026-08-11).
-- **Document-structure-level formatting configuration** (Phase 3, in addition to
-  per-element-type formatting): whether question titles are shown vs. numbered (using the
-  QID — always available via each page's "Staff information" panel, confirmed not gated
-  on assessment type — as the instructor-facing reference when numbered/hidden), and
-  whether/how zone titles are displayed (data now captured in `structure.json`, see
-  `planning_notes/2026-08-11 image and metadata fetch plus roadmap notes.md`). The user
-  may want additional document-level options beyond these — ask for their full list
-  before planning Phase 3, don't assume this is complete.
+  `html_parser.py` (`UnsupportedElementError`) rather than mis-rendered. **Revised
+  2026-08-12**: no longer deferred — in scope for Phase 3B, best-effort (render each
+  widget inline within the question; address specific fragility if/when it surfaces).
+  Full spec: `planning_notes/2026-08-12 phase 3a implementation and phase 3b spec.md`.
+- **Document-structure-level formatting configuration**: **done as of Phase 3A**
+  (2026-08-12) — question number/title/points/qid and zone titles are all exposed to
+  the instructor's template; see Architecture item 5.
+- **Element/question-level formatting configuration (Phase 3B)**: not yet implemented.
+  Full user-provided specification (config.yaml schema, per-list-style/display/fill-in
+  options, defaults) preserved in
+  `planning_notes/2026-08-12 phase 3a implementation and phase 3b spec.md` — read that
+  before starting Phase 3B rather than re-deriving requirements.
 - **Rich HTML → docx conversion and image embedding** (Phase 4, reframed from "Math
   rendering" — same underlying "walk the HTML and convert it properly" work): paragraphs/
   bold/italic/underline, currently flattened to plain text by `html_parser.py`'s

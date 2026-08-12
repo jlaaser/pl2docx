@@ -2,7 +2,11 @@ from pathlib import Path
 
 import pytest
 
-from pl2docx.html_parser import UnsupportedElementError, parse_instance_question_html
+from pl2docx.html_parser import (
+    UnsupportedElementError,
+    format_points_text,
+    parse_instance_question_html,
+)
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "instance_question"
 
@@ -20,6 +24,8 @@ def test_multiple_choice_blank():
     assert q.correct_option_indices == []
     assert q.answer_panel_text is None
     assert q.points == "1"
+    assert q.points_numeric == 1.0
+    assert q.qid is None  # this fixture's markup has no "Staff information" panel
 
 
 def test_multiple_choice_key():
@@ -153,3 +159,30 @@ def test_no_points_panel_gives_none():
     """
     q = parse_instance_question_html(html)
     assert q.points is None
+    assert q.points_numeric is None
+    assert q.qid is None
+
+
+def test_qid_extracted_when_staff_info_panel_present():
+    html = """
+    <div class="question-block">
+      <div class="card-header"><h1>Has a staff info panel</h1></div>
+      <div class="card-body question-body">
+        <span class="input-group pl-integer-input">
+          <input class="form-control pl-integer-input-input" name="answer" type="text">
+        </span>
+      </div>
+    </div>
+    <div class="pe-1">QID:</div>
+    <div><a href="/pl/course_instance/1/instructor/question/47">TEST/pl-integer-input</a></div>
+    """
+    q = parse_instance_question_html(html)
+    assert q.qid == "TEST/pl-integer-input"
+
+
+def test_format_points_text():
+    assert format_points_text(1.0, "1") == "1 point"
+    assert format_points_text(2.0, "2") == "2 points"
+    assert format_points_text(1.5, "1.5") == "1.5 points"
+    assert format_points_text(None, "up to 2") == "up to 2"
+    assert format_points_text(None, None) is None
