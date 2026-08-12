@@ -1,8 +1,14 @@
+import re
+from pathlib import Path
+
+from docx.shared import Inches
 from docxtpl import DocxTemplate
 
 from pl2docx.element_config import ElementConfig, FillInPreferences, SelectorPreferences
 from pl2docx.element_renderer import build_question_context
-from pl2docx.html_parser import ParsedQuestion, Widget, plain
+from pl2docx.html_parser import ImageRef, ParsedQuestion, Widget, plain
+
+FIXTURES_DIR = Path(__file__).parent / "fixtures" / "instance_question"
 
 
 def _tpl(starter_template) -> DocxTemplate:
@@ -268,3 +274,91 @@ def test_prompt_bold_run_rendered_with_real_bold_formatting(starter_template):
         r for p in ctx["question_contents"].paragraphs for r in p.runs if "This is" in r.text
     ]
     assert all(not r.bold for r in non_bold_runs)
+
+
+def _inline_shape_count(subdoc) -> int:
+    """Count real embedded pictures in `subdoc`.
+
+    `Subdoc.inline_shapes` (a docxtpl passthrough to the underlying
+    python-docx `Document`) doesn't reliably reflect pictures added via
+    `Run.add_picture()` on paragraphs docxtpl created - confirmed empty even
+    when a `<w:drawing>` element genuinely is present in a run's XML.
+    Checking the run XML directly is what actually works.
+    """
+    return sum(
+        1
+        for p in subdoc.paragraphs
+        for r in p.runs
+        if "<w:drawing>" in r._element.xml
+    )
+
+
+def test_image_embeds_as_real_picture_when_base_dir_given(starter_template):
+    """Phase 4 increment 2: an ImageRef must become a real embedded picture
+    (not the "[image]" fallback text) when image_base_dir resolves to a real
+    file - uses the image_blank.html fixture + its sibling files/tiny_dot.png."""
+    from pl2docx.html_parser import parse_instance_question_html
+
+    html = (FIXTURES_DIR / "image_blank.html").read_text(encoding="utf-8")
+    question = parse_instance_question_html(html)
+
+    tpl = _tpl(starter_template)
+    element_config = ElementConfig(preferences={}, behavior_class={})
+    ctx = build_question_context(tpl, question, 1, element_config, image_base_dir=FIXTURES_DIR)
+
+    assert _inline_shape_count(ctx["question_contents"]) == 1
+    assert "[image]" not in _text(ctx["question_contents"])
+
+    # width="150" in the source <img> -> 150/96 inch, in EMU - checked via the
+    # raw <wp:extent cx="..."> XML since Subdoc.inline_shapes isn't reliable
+    # here (see _inline_shape_count).
+    picture_run = next(
+        r
+        for p in ctx["question_contents"].paragraphs
+        for r in p.runs
+        if "<w:drawing>" in r._element.xml
+    )
+    match = re.search(r'<wp:extent cx="(\d+)"', picture_run._element.xml)
+    assert match is not None
+    assert int(match.group(1)) == int(Inches(150 / 96))
+
+
+def test_image_falls_back_to_alt_text_without_image_base_dir(starter_template):
+    """No image_base_dir given (the pre-increment-2 default) must keep the
+    old alt-text fallback behavior, not attempt to embed anything."""
+    from pl2docx.html_parser import parse_instance_question_html
+
+    html = (FIXTURES_DIR / "image_blank.html").read_text(encoding="utf-8")
+    question = parse_instance_question_html(html)
+
+    tpl = _tpl(starter_template)
+    element_config = ElementConfig(preferences={}, behavior_class={})
+    ctx = build_question_context(tpl, question, 1, element_config)
+
+    assert _inline_shape_count(ctx["question_contents"]) == 0
+    assert "a red dot" in _text(ctx["question_contents"])
+
+
+def test_image_falls_back_to_alt_text_when_file_missing(starter_template):
+    """A referenced image that isn't actually on disk (e.g. an external image
+    fetch.py deliberately didn't download) must fall back gracefully, not
+    raise and fail the whole render."""
+    tpl = _tpl(starter_template)
+    widget = Widget(kind="integer_input", name="answer")
+    question = ParsedQuestion(
+        title="Q",
+        prompt_segments=[
+            [ImageRef(local_path="files/does_not_exist.png", alt="missing image")],
+            plain(""),
+        ],
+        widgets=[widget],
+        answer_panel_text=None,
+        points="1",
+        points_numeric=1.0,
+        qid="q/5",
+    )
+    element_config = ElementConfig(preferences={}, behavior_class={})
+    ctx = build_question_context(tpl, question, 1, element_config, image_base_dir=FIXTURES_DIR)
+
+    assert _inline_shape_count(ctx["question_contents"]) == 0
+    assert "missing image" in _text(ctx["question_contents"])

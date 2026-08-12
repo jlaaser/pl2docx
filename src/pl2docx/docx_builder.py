@@ -46,6 +46,7 @@ def render_document(
     is_answer_key: bool,
     output_path: Path,
     element_config: ElementConfig | None = None,
+    image_base_dir: Path | None = None,
 ) -> None:
     """Render `zones` into a docx built from `template_path`.
 
@@ -79,6 +80,12 @@ def render_document(
         (see `pl2docx.element_config`). `None` (the default) applies
         built-in defaults for every widget kind, same as an empty
         `ElementConfig`.
+    image_base_dir : pathlib.Path or None
+        Passed through to `pl2docx.element_renderer.build_question_context`
+        for every question in `zones` — the directory each question's
+        `ImageRef.local_path` values are relative to (see that function's
+        docs). `None` (the default) skips real image embedding, falling back
+        to alt text.
 
     Raises
     ------
@@ -105,7 +112,7 @@ def render_document(
         {
             "title": zone["title"],
             "questions": [
-                build_question_context(tpl, question, number, element_config)
+                build_question_context(tpl, question, number, element_config, image_base_dir)
                 for question, number in zone["questions"]
             ],
         }

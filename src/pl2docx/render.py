@@ -89,6 +89,7 @@ def render_instance(
         is_answer_key=False,
         output_path=blank_path,
         element_config=element_config,
+        image_base_dir=instance_dir / "blank",
     )
     render_document(
         template_path,
@@ -96,6 +97,7 @@ def render_instance(
         is_answer_key=True,
         output_path=key_path,
         element_config=element_config,
+        image_base_dir=instance_dir / "key",
     )
     return blank_path, key_path
 

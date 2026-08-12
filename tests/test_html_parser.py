@@ -498,6 +498,43 @@ def test_prompt_paragraphs_and_list_preserved():
     assert any(isinstance(n, ListItemStart) for n in nodes)
 
 
+def test_image_width_px_parsed_from_width_attribute():
+    """Phase 4 increment 2: the walker must capture <img width> so the renderer
+    can size the embedded picture to PL's own intended display size."""
+    html = """
+    <div class="question-block">
+      <div class="card-header"><h1>Image with width</h1></div>
+      <div class="card-body question-body">
+        <p><img src="files/1_0_diagram.png" alt="a diagram" width="150"></p>
+        <span class="input-group pl-integer-input">
+          <input class="form-control pl-integer-input-input" name="answer" type="text">
+        </span>
+      </div>
+    </div>
+    """
+    q = parse_instance_question_html(html)
+    images = [n for n in q.prompt_segments[0] if isinstance(n, ImageRef)]
+    assert len(images) == 1
+    assert images[0].width_px == 150
+
+
+def test_image_missing_or_unparseable_width_gives_none():
+    html = """
+    <div class="question-block">
+      <div class="card-header"><h1>Image without width</h1></div>
+      <div class="card-body question-body">
+        <p><img src="files/1_0_diagram.png" alt="a diagram"></p>
+        <span class="input-group pl-integer-input">
+          <input class="form-control pl-integer-input-input" name="answer" type="text">
+        </span>
+      </div>
+    </div>
+    """
+    q = parse_instance_question_html(html)
+    images = [n for n in q.prompt_segments[0] if isinstance(n, ImageRef)]
+    assert images[0].width_px is None
+
+
 def test_prompt_image_and_math_recognized_but_not_yet_rendered():
     """Phase 4 increment 1 scope: the walker recognizes <img> as an ImageRef and
     keeps raw $...$/$$...$$ math text as plain text (increments 2/3 handle real

@@ -110,11 +110,19 @@ class ImageRef:
         only it knows the instance directory.
     alt : str
         The `<img alt>` text, if any. Used as interim fallback display text
-        until image embedding (Phase 4 increment 2) renders the real picture.
+        before Phase 4 increment 2, and still the fallback if the real image
+        file can't be found on disk at render time.
+    width_px : int or None
+        The `<img width>` attribute value, if present and parseable — this is
+        PL's own intended on-page display size (CSS reference pixels, i.e.
+        96px/inch), not necessarily the source image file's native
+        resolution. `None` if absent/unparseable, in which case the renderer
+        falls back to a fixed default width.
     """
 
     local_path: str
     alt: str = ""
+    width_px: int | None = None
 
 
 @dataclass(frozen=True)
@@ -498,6 +506,15 @@ _BLOCK_TAGS = {"p", "li"}
 _SKIP_TAGS = {"script", "style"}
 
 
+def _parse_width_px(width_attr: str | None) -> int | None:
+    if not width_attr:
+        return None
+    try:
+        return int(str(width_attr).strip())
+    except ValueError:
+        return None
+
+
 def _walk_content(
     root: Tag, marker_by_id: dict[int, int] | None = None
 ) -> list[ContentNode | _WidgetMarker]:
@@ -548,7 +565,13 @@ def _walk_into(
     if name in _SKIP_TAGS:
         return
     if name == "img":
-        out.append(ImageRef(local_path=node.get("src", ""), alt=node.get("alt", "")))
+        out.append(
+            ImageRef(
+                local_path=node.get("src", ""),
+                alt=node.get("alt", ""),
+                width_px=_parse_width_px(node.get("width")),
+            )
+        )
         return
     if name == "br":
         out.append(ParagraphBreak())
