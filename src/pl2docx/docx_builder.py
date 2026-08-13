@@ -18,7 +18,7 @@ from docx.opc.exceptions import PackageNotFoundError
 from docxtpl import DocxTemplate
 
 from pl2docx.element_config import ElementConfig
-from pl2docx.element_renderer import build_question_context
+from pl2docx.element_renderer import build_question_context, create_list_formats
 from pl2docx.html_parser import ParsedQuestion
 
 
@@ -93,6 +93,10 @@ def render_document(
         If `template_path` can't be opened as a valid docx package — most
         often because it's currently open in Word, or a cloud-storage sync
         (e.g. OneDrive) hasn't finished writing it yet after a save.
+    RuntimeError
+        If `template_path` has no numbering-definitions part and one can't
+        be created - see `pl2docx.element_renderer.create_list_formats`.
+        Real templates virtually always have one already.
     """
     if element_config is None:
         element_config = ElementConfig(preferences={}, behavior_class={})
@@ -108,11 +112,19 @@ def render_document(
             "and wait a moment for syncing to finish, then try again."
         ) from exc
 
+    # Created once for the whole render (not per question) - real Word list
+    # numbering needs shared abstractNum format definitions, minted once,
+    # that every question's own lists then mint independent <w:num> instances
+    # against (see create_list_formats/ListFormats).
+    list_formats = create_list_formats(tpl)
+
     zones_context = [
         {
             "title": zone["title"],
             "questions": [
-                build_question_context(tpl, question, number, element_config, image_base_dir)
+                build_question_context(
+                    tpl, question, number, element_config, image_base_dir, list_formats
+                )
                 for question, number in zone["questions"]
             ],
         }

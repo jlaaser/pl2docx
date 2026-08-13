@@ -25,10 +25,28 @@ pixels) when present, else a fixed default width. Falls back to alt text
 (same as before this increment) when no `image_base_dir` is given, or the
 referenced file isn't found on disk - a missing image shouldn't fail the
 whole render.
+
+**Phase 4 increment 1 follow-up**: `ListItemStart`/`ListItemEnd` nodes render
+as *real* Word list items (`<w:numPr>` XML, `_apply_list_numbering`) when a
+`list_formats` is supplied - see `build_question_context`'s parameter docs -
+instead of plain prepended `"1. "`/`"• "` text. Confirmed this session:
+`tpl.new_subdoc()` is always called without a `docpath` in this codebase, so
+every subdoc shares the *same* in-memory document part/package as `tpl`
+itself (`docxtpl/subdoc.py`'s no-`docpath` branch does
+`self.subdocx._part = self.docx._part`) - meaning a `numId` only needs to
+exist in `tpl`'s own `numbering.xml` by the time a subdoc paragraph
+references it, no cross-package merge step needed. A whole `<li>`'s content
+(however many lines/images it has) renders into *one* Word paragraph, using
+soft line breaks (`Run.add_break()`, i.e. Word's own Shift+Enter convention)
+between its internal lines instead of real paragraph breaks - simpler than
+matching each internal line's own indent to the list's indent definition,
+for an equivalent visual result. Falls back to the old flat marker-text
+behavior (same as before this follow-up) when no `list_formats` is given.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from docx.oxml import OxmlElement
@@ -45,6 +63,7 @@ from pl2docx.element_config import (
 from pl2docx.html_parser import (
     ContentNode,
     ImageRef,
+    ListItemEnd,
     ListItemStart,
     MathRef,
     ParagraphBreak,
@@ -63,6 +82,183 @@ _CSS_PX_PER_INCH = 96
 #: Fallback width when a source `<img>` has no usable `width` attribute.
 _DEFAULT_IMAGE_WIDTH = Inches(3)
 
+#: Standard Word list indent (0.5in left, 0.25in hanging) - matches Word's
+#: own default numbered/bulleted list styles' own indent.
+_LIST_INDENT_TWIPS = 720
+_LIST_HANGING_TWIPS = 360
+
+@dataclass(frozen=True)
+class ListFormats:
+    """Document-wide real-list format definitions, created once per `render_document()` call.
+
+    Two `<w:abstractNum>` definitions (decimal-numbered, bulleted) that every
+    per-question list instance mints a fresh `<w:num>` against (see
+    `_ListNumIds`) - sharing the *format* while each distinct source list
+    gets its own independently-restarting Word numbering instance.
+    """
+
+    numbering_elm: object  # docx.oxml.numbering.CT_Numbering
+    decimal_abstract_id: int
+    bullet_abstract_id: int
+
+
+def create_list_formats(tpl: DocxTemplate) -> ListFormats:
+    """Create this render's shared real-list format definitions.
+
+    Parameters
+    ----------
+    tpl : docxtpl.DocxTemplate
+        The template instance being rendered. List numbering is written
+        into its own `numbering.xml` part - since every subdoc shares the
+        same in-memory document part as `tpl` (see this module's docstring),
+        this only needs calling once per `render_document()` call, not once
+        per question/subdoc.
+
+    Returns
+    -------
+    ListFormats
+
+    Raises
+    ------
+    RuntimeError
+        If the template has no numbering-definitions part and python-docx
+        can't create one from scratch (`NumberingPart.new()` is
+        unimplemented there) - real templates virtually always have one
+        (any plain `Document()`, including what `starter_template.py`
+        generates, ships a full `numbering.xml`), so this should only fire
+        for an unusual instructor-supplied template built by some other
+        tool. Fixable by opening the template in Word, adding then removing
+        a numbered/bulleted list anywhere, and re-saving.
+    """
+    try:
+        numbering_part = tpl.get_docx().part.numbering_part
+    except NotImplementedError as exc:
+        raise RuntimeError(
+            "This template has no numbering-definitions part (numbering.xml), and "
+            "python-docx can't create one from scratch. Open the template in Word, "
+            "add a numbered or bulleted list anywhere (even briefly, then delete it "
+            "again), save, and retry."
+        ) from exc
+    numbering_elm = numbering_part.element
+    decimal_id = _add_list_abstract_num(numbering_elm, ordered=True)
+    bullet_id = _add_list_abstract_num(numbering_elm, ordered=False)
+    return ListFormats(
+        numbering_elm=numbering_elm, decimal_abstract_id=decimal_id, bullet_abstract_id=bullet_id
+    )
+
+
+def _next_abstract_num_id(numbering_elm) -> int:
+    existing = [int(v) for v in numbering_elm.xpath("./w:abstractNum/@w:abstractNumId")]
+    return (max(existing) + 1) if existing else 0
+
+
+def _add_list_abstract_num(numbering_elm, ordered: bool) -> int:
+    """Create a new `<w:abstractNum>` (decimal or bullet format), return its id.
+
+    Raw OOXML construction (`OxmlElement`/`qn()`) - python-docx's object
+    model has no `CT_AbstractNum` support at all (confirmed:
+    `docx/oxml/numbering.py` defines `CT_Num`/`CT_NumPr`/`CT_Numbering` but
+    nothing for `<w:abstractNum>` itself), so this follows the same
+    low-level pattern as `_add_run_border`.
+    """
+    abstract_num_id = _next_abstract_num_id(numbering_elm)
+
+    abstract_num = OxmlElement("w:abstractNum")
+    abstract_num.set(qn("w:abstractNumId"), str(abstract_num_id))
+
+    multi_level = OxmlElement("w:multiLevelType")
+    multi_level.set(qn("w:val"), "hybridMultilevel")
+    abstract_num.append(multi_level)
+
+    lvl = OxmlElement("w:lvl")
+    lvl.set(qn("w:ilvl"), "0")
+
+    start = OxmlElement("w:start")
+    start.set(qn("w:val"), "1")
+    lvl.append(start)
+
+    num_fmt = OxmlElement("w:numFmt")
+    num_fmt.set(qn("w:val"), "decimal" if ordered else "bullet")
+    lvl.append(num_fmt)
+
+    lvl_text = OxmlElement("w:lvlText")
+    lvl_text.set(qn("w:val"), "%1." if ordered else "•")
+    lvl.append(lvl_text)
+
+    lvl_jc = OxmlElement("w:lvlJc")
+    lvl_jc.set(qn("w:val"), "left")
+    lvl.append(lvl_jc)
+
+    p_pr = OxmlElement("w:pPr")
+    ind = OxmlElement("w:ind")
+    ind.set(qn("w:left"), str(_LIST_INDENT_TWIPS))
+    ind.set(qn("w:hanging"), str(_LIST_HANGING_TWIPS))
+    p_pr.append(ind)
+    lvl.append(p_pr)
+
+    abstract_num.append(lvl)
+
+    # <w:abstractNum> elements must precede any <w:num> elements per the
+    # schema's declared child order - insert right after any existing
+    # <w:abstractNum> siblings, ahead of everything else.
+    existing_abstract_nums = numbering_elm.findall(qn("w:abstractNum"))
+    numbering_elm.insert(len(existing_abstract_nums), abstract_num)
+
+    return abstract_num_id
+
+
+class _ListNumIds:
+    """Per-subdoc `list_id -> Word numId` map, scoped to one question/answer render.
+
+    Mints a fresh `<w:num>` instance (`CT_Numbering.add_num`) the first time
+    each source `list_id` is seen, so multiple independent lists - even ones
+    split across several `prompt_segments` by an interleaved widget - each
+    get their own real, independently-restarting Word numbering sequence,
+    sharing one `ListFormats` abstractNum. Deliberately scoped narrower than
+    `ListFormats` (fresh instance per `_build_question_contents`/
+    `_build_answer_contents` call, not shared document-wide): `list_id` is
+    only unique within one `ParsedQuestion` (see `ListItemStart.list_id`'s
+    docstring on why reusing it across different questions/parses would risk
+    an `id()`-reuse collision).
+    """
+
+    def __init__(self, formats: ListFormats):
+        self._formats = formats
+        self._num_id_by_list_id: dict[int, int] = {}
+
+    def num_id_for(self, list_id: int, ordered: bool) -> int:
+        if list_id not in self._num_id_by_list_id:
+            abstract_id = self._formats.decimal_abstract_id if ordered else self._formats.bullet_abstract_id
+            num_elm = self._formats.numbering_elm.add_num(abstract_id)
+            # Confirmed necessary this session (not optional, contrary to the
+            # original plan): without an explicit startOverride, Word treats
+            # multiple <w:num> instances sharing one <w:abstractNum> as one
+            # continuing logical list (e.g. a question's own list at 1/2/3,
+            # then its answer-key list picking up at 4/5/6) rather than each
+            # independently restarting at the abstractNum's own <w:start>.
+            num_elm.add_lvlOverride(ilvl=0).add_startOverride(1)
+            self._num_id_by_list_id[list_id] = num_elm.numId
+        return self._num_id_by_list_id[list_id]
+
+
+def _apply_list_numbering(paragraph, num_id: int, ilvl: int = 0) -> None:
+    """Attach `<w:numPr>` (real Word list membership) to `paragraph`.
+
+    Word derives the paragraph's own indent/marker from the numbering
+    definition (`_add_list_abstract_num`) once this is attached - no
+    separate indent needs setting on the paragraph itself.
+    """
+    p_pr = paragraph._p.get_or_add_pPr()
+    num_pr = OxmlElement("w:numPr")
+    ilvl_elm = OxmlElement("w:ilvl")
+    ilvl_elm.set(qn("w:val"), str(ilvl))
+    num_pr.append(ilvl_elm)
+    num_id_elm = OxmlElement("w:numId")
+    num_id_elm.set(qn("w:val"), str(num_id))
+    num_pr.append(num_id_elm)
+    p_pr.insert(0, num_pr)
+
+
 _SELECTOR_KINDS = ("multiple_choice", "checkbox")
 _LIST_MARKERS = {
     "letter-labels": lambda idx: f"({option_letter(idx)})",
@@ -77,6 +273,7 @@ def build_question_context(
     number: int,
     element_config: ElementConfig,
     image_base_dir: Path | None = None,
+    list_formats: ListFormats | None = None,
 ) -> dict:
     """Build one question's Jinja context dict, including its 4 Subdocs.
 
@@ -107,6 +304,12 @@ def build_question_context(
         from). `None` (the default) skips real embedding entirely, falling
         back to alt text for every image - same as before this parameter
         existed.
+    list_formats : ListFormats or None
+        This render's shared list-format definitions (see
+        `create_list_formats`, called once per `render_document()` call, not
+        per question). `None` (the default) falls back to plain prepended
+        `"1. "`/`"• "` marker text for lists - not a real Word list - same
+        as before this parameter existed.
 
     Returns
     -------
@@ -120,7 +323,7 @@ def build_question_context(
         (but always present) when no widget uses `template` display.
     """
     question_contents, answer_element = _build_question_contents(
-        tpl, question, element_config, image_base_dir
+        tpl, question, element_config, image_base_dir, list_formats
     )
     return {
         "number": number,
@@ -129,28 +332,48 @@ def build_question_context(
         "points_numeric": question.points_numeric,
         "points_text": format_points_text(question.points_numeric, question.points),
         "question_contents": question_contents,
-        "answer_contents": _build_answer_contents(tpl, question, image_base_dir),
+        "answer_contents": _build_answer_contents(tpl, question, image_base_dir, list_formats),
         "answer_space": _build_answer_space(tpl),
         "answer_element": answer_element,
     }
 
 
 def _build_question_contents(
-    tpl: DocxTemplate, question: ParsedQuestion, element_config: ElementConfig, image_base_dir: Path | None
+    tpl: DocxTemplate,
+    question: ParsedQuestion,
+    element_config: ElementConfig,
+    image_base_dir: Path | None,
+    list_formats: ListFormats | None = None,
 ):
     subdoc = tpl.new_subdoc()
     answer_element = tpl.new_subdoc()
+    list_num_ids = _ListNumIds(list_formats) if list_formats is not None else None
 
-    state = {"paragraph": subdoc.add_paragraph()}
+    state = {"paragraph": subdoc.add_paragraph(), "in_list_item": False}
 
     def append_nodes(nodes: list[ContentNode]) -> None:
-        _render_nodes_into_subdoc(state, subdoc, nodes, image_base_dir)
+        _render_nodes_into_subdoc(state, subdoc, nodes, image_base_dir, list_num_ids)
 
     if not question.widgets:
         append_nodes(question.prompt_segments[0] if question.prompt_segments else [])
         return subdoc, answer_element
 
     for i, widget in enumerate(question.widgets):
+        # Any ListItemStart/ListItemEnd trailing/leading this segment is
+        # processed normally here (never trimmed away - see their
+        # docstrings), which already applies real list numbering to
+        # state["paragraph"] and tracks state["in_list_item"] before the
+        # widget's own render below runs - no separate peeling step needed.
+        # (Earlier draft of this logic *did* peel a trailing ListItemStart
+        # out and hand it to the widget render as a "pending marker" - that
+        # was solving a problem specific to the old flat-text-marker
+        # rendering, where leaving it in the segment would've put the
+        # marker text in the wrong paragraph. It doesn't apply anymore now
+        # that block-display widgets themselves reuse state["paragraph"]
+        # when already inside a list item, below - and that peeling missed
+        # real content entirely when a widget wasn't a <li>'s *sole*
+        # content, e.g. physical-or-chemical's images+arrow+colon before
+        # each widget, confirmed by tracing through real fetched HTML.)
         append_nodes(question.prompt_segments[i])
 
         prefs = resolve_preferences(element_config, widget.kind)
@@ -167,10 +390,26 @@ def _build_question_contents(
             )
         else:  # "block" or "template"
             target = answer_element if display == "template" else subdoc
+            # Reuse the current (already list-numbered) paragraph as this
+            # widget's first line/option when we're mid-list-item - a real
+            # *new* paragraph here would have no numPr/indent of its own at
+            # all. Only when `target` is `subdoc` (plain "block" display):
+            # "template" display routes to answer_element, a wholly
+            # different Subdoc state["paragraph"] doesn't belong to.
+            first_paragraph = state["paragraph"] if (state["in_list_item"] and target is subdoc) else None
+            # General fix, not selector-specific: "block" display means "this
+            # widget's content starts its own line" - if the reused paragraph
+            # already has content on its current line (e.g.
+            # physical-or-chemical's image/arrow/colon text preceding the
+            # widget within the same <li>), that requires an explicit soft
+            # break here, for any block-display widget kind, not just
+            # multiple-choice/checkbox options.
+            if first_paragraph is not None and first_paragraph.runs:
+                first_paragraph.add_run().add_break()
             runs = (
-                _render_selector_block(target, widget, prefs, image_base_dir)
+                _render_selector_block(target, widget, prefs, image_base_dir, first_paragraph)
                 if is_selector
-                else _render_fill_in_block(target, widget, image_base_dir)
+                else _render_fill_in_block(target, widget, image_base_dir, first_paragraph)
             )
             if display == "block":
                 state["paragraph"] = subdoc.add_paragraph()
@@ -223,19 +462,78 @@ def _render_nodes_to_paragraph(
 
 
 def _render_nodes_into_subdoc(
-    state: dict, sink, nodes: list[ContentNode], image_base_dir: Path | None = None
+    state: dict,
+    sink,
+    nodes: list[ContentNode],
+    image_base_dir: Path | None = None,
+    list_num_ids: _ListNumIds | None = None,
 ) -> None:
     """Render a node sequence into `sink`, starting new paragraphs on `ParagraphBreak`.
 
     `state["paragraph"]` is the shared "current paragraph" also used by widget
     rendering, so prompt text and inline widget content can share one running
-    paragraph exactly as Phase 3B's `append_text` did.
+    paragraph exactly as Phase 3B's `append_text` did. `state["in_list_item"]`
+    tracks whether we're currently inside a `<li>`'s content - while `True`, a
+    `ParagraphBreak` becomes a soft line break within the *same* (already
+    list-numbered) paragraph instead of starting a real new one, so a whole
+    multi-line `<li>` renders as one real Word list item, not just its first
+    line.
     """
     for node in nodes:
+        if isinstance(node, ListItemStart):
+            _start_list_item_paragraph(state, sink, node, list_num_ids)
+            continue
+        if isinstance(node, ListItemEnd):
+            state["in_list_item"] = False
+            continue
         if isinstance(node, ParagraphBreak):
-            state["paragraph"] = sink.add_paragraph()
+            if state.get("in_list_item"):
+                state["paragraph"].add_run().add_break()
+            else:
+                state["paragraph"] = sink.add_paragraph()
             continue
         _render_one_node(state["paragraph"], node, image_base_dir)
+
+
+def _start_list_item_paragraph(
+    state: dict, sink, item: ListItemStart, list_num_ids: _ListNumIds | None
+) -> None:
+    """Start (or reuse) `state["paragraph"]` as one list item's own paragraph.
+
+    Only starts a *fresh* paragraph if the current one already has content -
+    a `ListItemStart` immediately following a real `ParagraphBreak` (the
+    common case) finds an already-empty paragraph and reuses it directly,
+    avoiding a redundant blank one. Can't rely on that preceding
+    `ParagraphBreak` always being there, though: it's plain formatting and
+    can legitimately have been trimmed away (e.g. this segment starts
+    exactly at a `<li>` boundary right after a widget), while `ListItemStart`
+    itself never is - see its docstring.
+    """
+    if state["paragraph"].runs:
+        state["paragraph"] = sink.add_paragraph()
+    _apply_pending_list_item(state["paragraph"], item, list_num_ids)
+    state["in_list_item"] = True
+
+
+def _apply_pending_list_item(paragraph, item: ListItemStart, list_num_ids: _ListNumIds | None) -> None:
+    """Mark `paragraph` as list item `item`'s own paragraph.
+
+    Real `<w:numPr>` numbering when `list_num_ids` is available and `item`
+    has a real `list_id` (i.e. reached via the walker's dedicated
+    `<ol>`/`<ul>` handling, not a stray `<li>`) - otherwise falls back to
+    plain prepended marker text, same as before this follow-up.
+    """
+    if list_num_ids is not None and item.list_id is not None:
+        num_id = list_num_ids.num_id_for(item.list_id, item.ordered)
+        _apply_list_numbering(paragraph, num_id)
+    else:
+        _append_run_text(paragraph, _list_marker_text(item))
+
+
+def _list_marker_text(node: ListItemStart) -> str:
+    if node.ordered and node.index is not None:
+        return f"{node.index}. "
+    return "• "
 
 
 def _render_one_node(paragraph, node: ContentNode, image_base_dir: Path | None = None) -> Run | None:
@@ -244,11 +542,20 @@ def _render_one_node(paragraph, node: ContentNode, image_base_dir: Path | None =
     if isinstance(node, ParagraphBreak):
         # Only reached via `_render_nodes_to_paragraph` (inline widget content) -
         # `_render_nodes_into_subdoc` intercepts `ParagraphBreak` itself to start
-        # a real new paragraph instead. Here, there's no paragraph to split, so
-        # treat it as a plain word-separating space instead of dropping it.
+        # a real new paragraph (or a soft break) instead. Here, there's no
+        # paragraph to split, so treat it as a plain word-separating space
+        # instead of dropping it.
         return _append_run_text(paragraph, " ")
     if isinstance(node, ListItemStart):
-        return _append_run_text(paragraph, "• ")
+        # Only reached via `_render_nodes_to_paragraph` (inline widget-scoped
+        # content, e.g. option/label text) - real list numbering needs a
+        # `sink` to create/track paragraphs against, which that context
+        # doesn't have (and realistically never needs to - PL option/label
+        # text doesn't itself contain nested lists), so this always falls
+        # back to plain marker text regardless of `list_num_ids`.
+        return _append_run_text(paragraph, _list_marker_text(node))
+    if isinstance(node, ListItemEnd):
+        return None
     if isinstance(node, ImageRef):
         return _render_image(paragraph, node, image_base_dir)
     if isinstance(node, MathRef):
@@ -317,15 +624,40 @@ def _render_fill_in_inline(paragraph, widget: Widget, image_base_dir: Path | Non
 
 
 def _render_selector_block(
-    sink, widget: Widget, prefs, image_base_dir: Path | None = None
+    sink, widget: Widget, prefs, image_base_dir: Path | None = None, first_paragraph=None
 ) -> list[Run]:
+    """Render each option as its own paragraph - or, given `first_paragraph`
+    (this widget is a list item's own content), *all* options into that one
+    paragraph instead, joined by soft line breaks - real content:
+    `physical-or-chemical`'s dropdown-rendered options are each a `<li>`'s
+    sole content. Keeps every option under the list item's own indent/number
+    (a real second paragraph per option would have no numPr/indent of its
+    own at all), matching the same "whole `<li>` = one paragraph" policy used
+    everywhere else in this module.
+
+    Every option starts on its own soft-broken line within that shared
+    paragraph - block display inherently means "one option per line". (The
+    leading break before the *first* option, needed when `first_paragraph`
+    already carries other content on its current line - e.g.
+    `physical-or-chemical`'s image/arrow/colon text preceding the options
+    within the same `<li>` - is handled by the caller, `_build_question_contents`,
+    once, before this function is even called - not selector-specific, so it
+    applies uniformly to any block-display widget kind.)
+    """
     runs: list[Run] = []
+    single_paragraph_mode = first_paragraph is not None
+    paragraph = first_paragraph
     for idx, option_nodes in enumerate(widget.options):
-        paragraph = sink.add_paragraph()
+        if single_paragraph_mode:
+            if idx > 0:
+                paragraph.add_run().add_break()
+        else:
+            paragraph = sink.add_paragraph()
+        marker_start = len(paragraph.runs)
         marker = _LIST_MARKERS[prefs.list_style](idx)
         _append_run_text(paragraph, f"{marker} ")
         _render_nodes_to_paragraph(paragraph, option_nodes, image_base_dir)
-        combined = list(paragraph.runs)
+        combined = list(paragraph.runs[marker_start:])
         if prefs.bold_correct and idx in widget.correct_option_indices:
             for run in combined:
                 run.bold = True
@@ -333,8 +665,10 @@ def _render_selector_block(
     return runs
 
 
-def _render_fill_in_block(sink, widget: Widget, image_base_dir: Path | None = None) -> list[Run]:
-    paragraph = sink.add_paragraph()
+def _render_fill_in_block(
+    sink, widget: Widget, image_base_dir: Path | None = None, first_paragraph=None
+) -> list[Run]:
+    paragraph = first_paragraph if first_paragraph is not None else sink.add_paragraph()
     return _fill_in_runs(paragraph, widget, image_base_dir)
 
 
@@ -386,11 +720,17 @@ def _add_run_border(run: Run) -> None:
     rPr.append(bdr)
 
 
-def _build_answer_contents(tpl: DocxTemplate, question: ParsedQuestion, image_base_dir: Path | None = None):
+def _build_answer_contents(
+    tpl: DocxTemplate,
+    question: ParsedQuestion,
+    image_base_dir: Path | None = None,
+    list_formats: ListFormats | None = None,
+):
     subdoc = tpl.new_subdoc()
     if question.answer_panel_text is not None:
-        state = {"paragraph": subdoc.add_paragraph()}
-        _render_nodes_into_subdoc(state, subdoc, question.answer_panel_text, image_base_dir)
+        list_num_ids = _ListNumIds(list_formats) if list_formats is not None else None
+        state = {"paragraph": subdoc.add_paragraph(), "in_list_item": False}
+        _render_nodes_into_subdoc(state, subdoc, question.answer_panel_text, image_base_dir, list_num_ids)
     return subdoc
 
 

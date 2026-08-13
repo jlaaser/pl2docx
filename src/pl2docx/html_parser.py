@@ -93,7 +93,70 @@ class ParagraphBreak:
 
 @dataclass(frozen=True)
 class ListItemStart:
-    """Marks the start of an `<li>`'s content, immediately after its `ParagraphBreak`."""
+    """Marks the start of an `<li>`'s content, immediately after its `ParagraphBreak`.
+
+    Parameters
+    ----------
+    ordered : bool
+        Whether this `<li>`'s parent list is an `<ol>` (numbered) rather than
+        `<ul>` (bulleted).
+    index : int or None
+        This item's 1-based position among its parent `<ol>`/`<ul>`'s direct
+        `<li>` children, when known (i.e. reached via the walker's dedicated
+        `<ol>`/`<ul>` handling). `None` for a stray `<li>` encountered outside
+        any list container (malformed HTML) - renders as an unordered bullet
+        regardless of `ordered`, since there's no real position to number.
+    list_id : int or None
+        Identifies which distinct `<ol>`/`<ul>` this item belongs to - `id()`
+        of that list's own `Tag` object, captured once per list in the
+        walker's `<ol>`/`<ul>` handling. Needed because a single list can end
+        up split across multiple `ParsedQuestion.prompt_segments` (each
+        interleaved widget cuts a new segment - real content:
+        `physical-or-chemical`'s whole 3-item `<ol>` is one list, split into
+        3 segments by its 3 widgets), so the renderer needs a way to tell
+        "still the same list, keep counting" from "a different list, start a
+        new Word numbering instance." Safe to use `id()` here specifically
+        because it's only ever compared within the `ParsedQuestion` produced
+        by *one* `parse_instance_question_html` call (the renderer's
+        list-id-to-Word-numId map is freshly built per question and discarded
+        after) - not a case where CPython's id-reuse-after-garbage-collection
+        could cause two unrelated lists to collide. `None` for a stray `<li>`
+        outside any list container, same as `index`.
+
+    Notes
+    -----
+    Unlike `ParagraphBreak`, a `ListItemStart` is never dropped during
+    whitespace/boundary normalization, even when it ends up as the first or
+    last node in a segment - it carries real structural meaning (this is a
+    numbered/bulleted list item), not merely incidental formatting, so
+    dropping it would silently turn a list into unmarked paragraphs.
+    """
+
+    ordered: bool = False
+    index: int | None = None
+    list_id: int | None = None
+
+
+@dataclass(frozen=True)
+class ListItemEnd:
+    """Marks the end of a `<li>`'s content - the counterpart to `ListItemStart`.
+
+    Notes
+    -----
+    Needed so the renderer can tell precisely when "still inside this list
+    item, treat further paragraph breaks as soft line breaks within it"
+    turns back into ordinary new-paragraph behavior, rather than inferring it
+    ambiguously from surrounding content.
+
+    Like `ListItemStart`, this is never dropped during whitespace/boundary
+    normalization even at a segment's edge. A `<li>` whose sole content is a
+    widget (real content: every item in `TEST/pl-scinum-input`) puts this
+    node as the *leading* node of the prompt segment right after that
+    widget's marker - if it were trimmed away there (as a first draft of this
+    reasoning assumed, before tracing the widget-adjacent case through),
+    the renderer would never learn that list item's content had ended, and
+    "in list item" render state would leak into whatever comes next.
+    """
 
 
 @dataclass(frozen=True)
@@ -150,7 +213,7 @@ class MathRef:
 #: by the walker starting Phase 4 increment 1, but only rendered as their real
 #: picture/OMML form once increments 2/3 land (element_renderer falls back to
 #: alt text / raw LaTeX text until then).
-ContentNode = TextRun | ParagraphBreak | ListItemStart | ImageRef | MathRef
+ContentNode = TextRun | ParagraphBreak | ListItemStart | ListItemEnd | ImageRef | MathRef
 
 
 def plain(text: str) -> list[ContentNode]:
@@ -502,7 +565,7 @@ class _WidgetMarker:
 _BOLD_TAGS = {"strong", "b"}
 _ITALIC_TAGS = {"em", "i"}
 _UNDERLINE_TAGS = {"u"}
-_BLOCK_TAGS = {"p", "li"}
+_BLOCK_TAGS = {"p"}
 _SKIP_TAGS = {"script", "style"}
 
 
@@ -577,20 +640,61 @@ def _walk_into(
         out.append(ParagraphBreak())
         return
 
-    is_block = name in _BLOCK_TAGS
-    if is_block and out:
-        out.append(ParagraphBreak())
-    if name == "li":
-        out.append(ListItemStart())
-
     child_bold = bold or name in _BOLD_TAGS
     child_italic = italic or name in _ITALIC_TAGS
     child_underline = underline or name in _UNDERLINE_TAGS
+
+    if name in ("ol", "ul"):
+        # Handled here (not via the generic is_block/_BLOCK_TAGS path below) so
+        # each direct <li> child can be told its 1-based position and whether
+        # the list is ordered - needed for real "1./2./3." numbering instead
+        # of a flat bullet for every list, and for <ol> vs <ul> at all.
+        list_id = id(node)
+        index = 0
+        for child in node.children:
+            if isinstance(child, Tag) and child.name == "li":
+                index += 1
+                _walk_li(
+                    child, out, marker_by_id, child_bold, child_italic, child_underline,
+                    name == "ol", index, list_id,
+                )
+            else:
+                _walk_into(child, out, marker_by_id, child_bold, child_italic, child_underline)
+        return
+    if name == "li":
+        # A stray <li> outside any <ol>/<ul> (malformed HTML) - no real list
+        # to report an ordered flag/position/list_id from, so this always
+        # renders as a plain bullet. Real PL content always wraps <li> in
+        # ol/ul, which goes through the branch above instead.
+        _walk_li(node, out, marker_by_id, child_bold, child_italic, child_underline, False, None, None)
+        return
+
+    is_block = name in _BLOCK_TAGS
+    if is_block and out:
+        out.append(ParagraphBreak())
+
     for child in node.children:
         _walk_into(child, out, marker_by_id, child_bold, child_italic, child_underline)
 
     if is_block:
         out.append(ParagraphBreak())
+
+
+def _walk_li(
+    node: Tag, out: list[ContentNode | _WidgetMarker], marker_by_id: dict[int, int],
+    bold: bool, italic: bool, underline: bool, ordered: bool, index: int | None,
+    list_id: int | None,
+) -> None:
+    marker_index = marker_by_id.get(id(node))
+    if marker_index is not None:
+        out.append(_WidgetMarker(marker_index))
+        return
+    if out:
+        out.append(ParagraphBreak())
+    out.append(ListItemStart(ordered=ordered, index=index, list_id=list_id))
+    for child in node.children:
+        _walk_into(child, out, marker_by_id, bold, italic, underline)
+    out.append(ListItemEnd())
 
 
 def _normalize_nodes(nodes: list[ContentNode | _WidgetMarker]) -> list[ContentNode | _WidgetMarker]:
@@ -604,11 +708,14 @@ def _normalize_nodes(nodes: list[ContentNode | _WidgetMarker]) -> list[ContentNo
       Whitespace-only runs are kept as single-space separators at this stage -
       see the trimming pass below for why.
     - Consecutive `ParagraphBreak`s collapse to one.
-    - Leading/trailing `ParagraphBreak`/`ListItemStart`/whitespace-only-`TextRun`
-      nodes are stripped from both ends, and the first/last remaining
-      `TextRun`'s own leading/trailing whitespace is stripped - this is what
-      lets `_WidgetMarker`-adjacent segments end up with clean boundaries
-      without needing a separate `.strip()` step per segment.
+    - Leading/trailing `ParagraphBreak`/whitespace-only-`TextRun` nodes are
+      stripped from both ends, and the first/last remaining `TextRun`'s own
+      leading/trailing whitespace is stripped - this is what lets
+      `_WidgetMarker`-adjacent segments end up with clean boundaries without
+      needing a separate `.strip()` step per segment. `ListItemStart`/
+      `ListItemEnd` are never stripped, at either end, regardless - see
+      their docstrings for why (both carry state-transition signals the
+      renderer needs, even when they land exactly at a segment boundary).
     """
     merged: list[ContentNode | _WidgetMarker] = []
     for node in nodes:
@@ -641,9 +748,13 @@ def _normalize_nodes(nodes: list[ContentNode | _WidgetMarker]) -> list[ContentNo
             cleaned.append(node)
 
     def _is_boundary_junk(n) -> bool:
-        return isinstance(n, (ParagraphBreak, ListItemStart)) or (
-            isinstance(n, TextRun) and n.text.strip() == ""
-        )
+        # ListItemStart/ListItemEnd are deliberately excluded - see their
+        # docstrings. Trimming only removes incidental formatting (blank
+        # paragraph breaks/whitespace-only text), never a real list-item
+        # start/end signal, even when one ends up at a segment's edge (e.g.
+        # immediately before/after a widget that's itself the sole content
+        # of a <li>).
+        return isinstance(n, ParagraphBreak) or (isinstance(n, TextRun) and n.text.strip() == "")
 
     while cleaned and _is_boundary_junk(cleaned[0]):
         cleaned.pop(0)

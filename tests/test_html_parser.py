@@ -498,6 +498,93 @@ def test_prompt_paragraphs_and_list_preserved():
     assert any(isinstance(n, ListItemStart) for n in nodes)
 
 
+def test_ordered_list_gets_position_and_ordered_flag():
+    """<ol> items must carry ordered=True and their 1-based position, not just
+    a flat unordered bullet - real course content (answer-panel explanations)
+    uses numbered lists and expects real "1./2./3." numbering."""
+    from pl2docx.html_parser import ListItemStart
+
+    html = """
+    <div class="question-block">
+      <div class="card-header"><h1>Ordered list</h1></div>
+      <div class="card-body question-body">
+        <ol>
+          <li>First</li>
+          <li>Second</li>
+          <li>Third</li>
+        </ol>
+        <span class="input-group pl-integer-input">
+          <input class="form-control pl-integer-input-input" name="answer" type="text">
+        </span>
+      </div>
+    </div>
+    """
+    q = parse_instance_question_html(html)
+    items = [n for n in q.prompt_segments[0] if isinstance(n, ListItemStart)]
+    assert [(n.ordered, n.index) for n in items] == [(True, 1), (True, 2), (True, 3)]
+
+
+def test_unordered_list_has_no_position():
+    from pl2docx.html_parser import ListItemStart
+
+    html = """
+    <div class="question-block">
+      <div class="card-header"><h1>Unordered list</h1></div>
+      <div class="card-body question-body">
+        <ul>
+          <li>Alpha</li>
+          <li>Beta</li>
+        </ul>
+        <span class="input-group pl-integer-input">
+          <input class="form-control pl-integer-input-input" name="answer" type="text">
+        </span>
+      </div>
+    </div>
+    """
+    q = parse_instance_question_html(html)
+    items = [n for n in q.prompt_segments[0] if isinstance(n, ListItemStart)]
+    assert [n.ordered for n in items] == [False, False]
+
+
+def test_list_item_containing_only_a_widget_keeps_its_marker():
+    """Regression: a <li> whose sole content is a widget (real content: every
+    pl-scinum-input item in TEST/pl-scinum-input) used to lose its list-item
+    marker entirely - the ListItemStart landed exactly at a prompt-segment
+    boundary and got stripped by the same trimming that (correctly) drops a
+    stray leading/trailing ParagraphBreak there."""
+    from pl2docx.html_parser import ListItemStart
+
+    html = """
+    <div class="question-block">
+      <div class="card-header"><h1>List of widgets</h1></div>
+      <div class="card-body question-body">
+        <ol>
+          <li>
+            <span class="input-group pl-scinum-input">
+              <span class="input-group-text">first:</span>
+              <input class="form-control pl-scinum-input-input" name="a" type="text">
+            </span>
+          </li>
+          <li>
+            <span class="input-group pl-scinum-input">
+              <span class="input-group-text">second:</span>
+              <input class="form-control pl-scinum-input-input" name="b" type="text">
+            </span>
+          </li>
+        </ol>
+      </div>
+    </div>
+    """
+    q = parse_instance_question_html(html, additional_fill_in_tags=["pl-scinum-input"])
+    assert len(q.widgets) == 2
+    # Each widget's own segment (the one immediately preceding it) ends with
+    # its <li>'s ListItemStart, not empty.
+    assert isinstance(q.prompt_segments[0][-1], ListItemStart)
+    assert q.prompt_segments[0][-1].index == 1
+    assert isinstance(q.prompt_segments[1][-1], ListItemStart)
+    assert q.prompt_segments[1][-1].index == 2
+
+
 def test_image_width_px_parsed_from_width_attribute():
     """Phase 4 increment 2: the walker must capture <img width> so the renderer
     can size the embedded picture to PL's own intended display size."""
