@@ -245,6 +245,39 @@ def test_fill_in_label_and_suffix_extracted():
     assert _suffix(widget) == "units"
 
 
+def test_fill_in_width_chars_extracted_from_size_attribute():
+    """PL's own `size` HTML attribute (real per-input character width, e.g.
+    35 by default - `SIZE_DEFAULT` in every built-in fill-in element's own
+    `.py` source) must be captured as `Widget.width_chars`."""
+    html = """
+    <div class="question-block">
+      <div class="card-header"><h1>Sized fill-in</h1></div>
+      <div class="card-body question-body">
+        <span class="input-group pl-string-input">
+          <input class="form-control pl-string-input-input" name="answer" type="text" size="8">
+        </span>
+      </div>
+    </div>
+    """
+    q = parse_instance_question_html(html)
+    assert q.widgets[0].width_chars == 8
+
+
+def test_fill_in_width_chars_none_when_size_attribute_absent():
+    html = """
+    <div class="question-block">
+      <div class="card-header"><h1>Unsized fill-in</h1></div>
+      <div class="card-body question-body">
+        <span class="input-group pl-string-input">
+          <input class="form-control pl-string-input-input" name="answer" type="text">
+        </span>
+      </div>
+    </div>
+    """
+    q = parse_instance_question_html(html)
+    assert q.widgets[0].width_chars is None
+
+
 def test_number_input_detected():
     """pl-number-input is a core PL element sharing string/integer-input's exact
     markup pattern - confirmed against pl-number-input.mustache."""

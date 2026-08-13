@@ -99,10 +99,20 @@ class FillInPreferences:
         exists for fill-in-type widgets, so this always falls back to `"block"`.
     draw_border : bool
         Whether to draw a single box around this widget's label/blank/suffix content.
+    default_label : str or None
+        Fallback label text (e.g. `"Answer:"`) to prepend before the blank when this
+        widget's own source HTML supplies no `label` (`Widget.label is None`) — real
+        content: most fill-in elements are used bare, with no instructor-authored
+        label of their own. `None` (the default) means no fallback prefix at all, not
+        the old hardcoded `"Answer:"` — that behavior must now be opted into
+        explicitly per element kind via `config.yaml`, since a default the instructor
+        can't turn off isn't a real default. Never applied when the widget already has
+        its own `label`, regardless of this setting.
     """
 
     display: Display | None = None
     draw_border: bool = False
+    default_label: str | None = None
 
 
 ElementPreferences = SelectorPreferences | FillInPreferences

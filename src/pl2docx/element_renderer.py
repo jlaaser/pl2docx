@@ -440,7 +440,7 @@ def _build_question_contents(
             runs = (
                 _render_selector_inline(state["paragraph"], widget, prefs, image_base_dir)
                 if is_selector
-                else _render_fill_in_inline(state["paragraph"], widget, image_base_dir)
+                else _render_fill_in_inline(state["paragraph"], widget, prefs, image_base_dir)
             )
         else:  # "block" or "template"
             target = answer_element if display == "template" else subdoc
@@ -463,7 +463,7 @@ def _build_question_contents(
             runs = (
                 _render_selector_block(target, widget, prefs, image_base_dir, first_paragraph)
                 if is_selector
-                else _render_fill_in_block(target, widget, image_base_dir, first_paragraph)
+                else _render_fill_in_block(target, widget, prefs, image_base_dir, first_paragraph)
             )
             # Only start a fresh paragraph when this widget wasn't reusing an
             # already-list-numbered paragraph (first_paragraph is None) - when
@@ -844,8 +844,8 @@ def _render_selector_inline(
     return runs
 
 
-def _render_fill_in_inline(paragraph, widget: Widget, image_base_dir: Path | None = None) -> list[Run]:
-    return _fill_in_runs(paragraph, widget, image_base_dir)
+def _render_fill_in_inline(paragraph, widget: Widget, prefs, image_base_dir: Path | None = None) -> list[Run]:
+    return _fill_in_runs(paragraph, widget, prefs, image_base_dir)
 
 
 def _render_selector_block(
@@ -892,13 +892,40 @@ def _render_selector_block(
 
 
 def _render_fill_in_block(
-    sink, widget: Widget, image_base_dir: Path | None = None, first_paragraph=None
+    sink, widget: Widget, prefs, image_base_dir: Path | None = None, first_paragraph=None
 ) -> list[Run]:
     paragraph = first_paragraph if first_paragraph is not None else sink.add_paragraph()
-    return _fill_in_runs(paragraph, widget, image_base_dir)
+    return _fill_in_runs(paragraph, widget, prefs, image_base_dir)
 
 
-def _fill_in_runs(paragraph, widget: Widget, image_base_dir: Path | None = None) -> list[Run]:
+#: Fallback blank-line width (underscore count) when a widget has no resolved
+#: `width_chars` at all (e.g. a non-built-in `additional-elements` fill-in
+#: tag that doesn't follow PL's `size`/`cols` convention) - this project's
+#: previous fixed width, kept as the no-signal fallback.
+_DEFAULT_BLANK_CHARS = 20
+#: Clamp range for a widget's own `width_chars` (PL's real `size`/`cols`
+#: attribute value, verbatim) - guards against an instructor-set value that's
+#: impractically small/large for a printed blank line, not a guess at PL's
+#: own bounds (PL itself doesn't clamp `size`).
+_MIN_BLANK_CHARS = 5
+_MAX_BLANK_CHARS = 80
+#: Enlarged font size (points) for the blank line specifically, when
+#: `draw-border` is on - a run-level border sits tight against its text (see
+#: `_add_run_border`), which reads as cramped for handwritten answers at
+#: normal text size (confirmed by the user); bumping just the blank run's
+#: size gives real breathing room without resizing the widget's label/suffix
+#: text too.
+_BORDERED_BLANK_FONT_SIZE_PT = 20
+
+
+def _blank_text(widget: Widget) -> str:
+    """Choose the blank line's underscore run, sized from the widget's own input width."""
+    chars = widget.width_chars if widget.width_chars is not None else _DEFAULT_BLANK_CHARS
+    chars = max(_MIN_BLANK_CHARS, min(_MAX_BLANK_CHARS, chars))
+    return "_" * chars
+
+
+def _fill_in_runs(paragraph, widget: Widget, prefs, image_base_dir: Path | None = None) -> list[Run]:
     """Render this widget's label/blank/suffix, capturing *every* run added.
 
     Captures via a paragraph-length snapshot (before/after) rather than
@@ -911,14 +938,22 @@ def _fill_in_runs(paragraph, widget: Widget, image_base_dir: Path | None = None)
     same-bordered runs, and the untracked spacer run in between was never
     bordered). Snapshotting picks up literally everything added, spacers
     included.
+
+    `prefs.default_label` supplies fallback label text only when the widget's
+    own source HTML had none (`widget.label is None`) - never overrides a
+    real label. The blank's own run is tracked separately (`blank_run`, not
+    folded into the snapshot-only `combined` list) so `draw-border` can size
+    just that run larger, without touching label/suffix text size.
     """
-    blank = "_" * 20
     start = len(paragraph.runs)
     if widget.label is None:
-        _append_run_text(paragraph, f"Answer: {blank}")
-        return list(paragraph.runs[start:])
-    _render_nodes_to_paragraph(paragraph, widget.label, image_base_dir)
-    _append_run_text(paragraph, blank)
+        if prefs.default_label:
+            _append_run_text(paragraph, prefs.default_label)
+    else:
+        _render_nodes_to_paragraph(paragraph, widget.label, image_base_dir)
+    blank_run = _append_run_text(paragraph, _blank_text(widget))
+    if prefs.draw_border and blank_run is not None:
+        blank_run.font.size = Pt(_BORDERED_BLANK_FONT_SIZE_PT)
     if widget.suffix:
         _render_nodes_to_paragraph(paragraph, widget.suffix, image_base_dir)
     return list(paragraph.runs[start:])

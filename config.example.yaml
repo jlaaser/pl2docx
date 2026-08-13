@@ -55,9 +55,13 @@ template_path: "template.docx"
 #   pl-string-input:
 #     display: null              # inline | block (default when undetectable) | template | none
 #     draw-border: false
+#     default-label: null        # fallback label text (e.g. "Answer:") used only when the
+#                                 # element's own source HTML has no label of its own - no
+#                                 # prefix at all by default (must opt in per element kind)
 #   pl-integer-input:
 #     display: null
 #     draw-border: false
+#     default-label: null
 #
 # additional-elements: elements not built into pl2docx (typically course-specific,
 # e.g. this one lives only in the chem 0110 course repo) that still follow the same

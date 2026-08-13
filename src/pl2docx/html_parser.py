@@ -404,6 +404,18 @@ class Widget:
         For a fill-in-type kind, the element's `suffix` content (the
         `.input-group-text` immediately after the `<input>`), if present.
         Always `None` for `multiple_choice`/`checkbox`.
+    width_chars : int or None
+        For a fill-in-type kind, the element's on-page input width in
+        characters - PL's own `size` HTML attribute (every built-in fill-in
+        element, plus `pl-scinum-input`, always renders a real resolved
+        value here, defaulting to 35 in `SIZE_DEFAULT` when the instructor
+        didn't set one explicitly - confirmed against each element's own
+        `.py`/`.mustache` source), or a multiline element's `cols` attribute
+        as a fallback (same unit, different attribute name). `None` if
+        neither attribute is present/parseable (e.g. a non-built-in
+        `additional-elements` fill-in tag that doesn't follow this
+        convention) - callers should fall back to a fixed blank width in
+        that case. Always `None` for `multiple_choice`/`checkbox`.
     """
 
     kind: str
@@ -414,6 +426,7 @@ class Widget:
     is_dropdown: bool = False
     label: list[ContentNode] | None = None
     suffix: list[ContentNode] | None = None
+    width_chars: int | None = None
 
 
 @dataclass(frozen=True)
@@ -1124,8 +1137,8 @@ def _build_widget(group: _WidgetGroup, answer_body: Tag | None) -> Widget:
             is_inline=_extract_group_is_inline(group),
             is_dropdown=group.is_dropdown,
         )
-    label, suffix = _extract_group_label_suffix(group)
-    return Widget(kind=group.kind, name=group.name, label=label, suffix=suffix)
+    label, suffix, width_chars = _extract_group_label_suffix_width(group)
+    return Widget(kind=group.kind, name=group.name, label=label, suffix=suffix, width_chars=width_chars)
 
 
 def _extract_group_options(group: _WidgetGroup) -> list[list[ContentNode]]:
@@ -1158,13 +1171,13 @@ def _extract_group_is_inline(group: _WidgetGroup) -> bool:
     return "form-check-inline" in classes
 
 
-def _extract_group_label_suffix(
+def _extract_group_label_suffix_width(
     group: _WidgetGroup,
-) -> tuple[list[ContentNode] | None, list[ContentNode] | None]:
+) -> tuple[list[ContentNode] | None, list[ContentNode] | None, int | None]:
     container = group.containers[0]
     input_tag = container.find(attrs={"name": group.name})
     if input_tag is None:
-        return None, None
+        return None, None, None
 
     texts = container.find_all(class_="input-group-text")
     label: list[ContentNode] | None = None
@@ -1178,7 +1191,19 @@ def _extract_group_label_suffix(
                 label = nodes
         else:
             suffix = nodes  # last trailing one wins
-    return label, suffix
+
+    width_chars = _parse_width_chars(input_tag.get("size")) or _parse_width_chars(input_tag.get("cols"))
+    return label, suffix, width_chars
+
+
+def _parse_width_chars(value: str | None) -> int | None:
+    if not value:
+        return None
+    try:
+        parsed = int(str(value).strip())
+    except ValueError:
+        return None
+    return parsed if parsed > 0 else None
 
 
 def _precedes(tag: Tag, other: Tag) -> bool:

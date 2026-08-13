@@ -42,12 +42,13 @@ def _mc_question(prompt=("Pick one.", "")):
     )
 
 
-def _string_question(label=None, suffix=None):
+def _string_question(label=None, suffix=None, width_chars=None):
     widget = Widget(
         kind="string_input",
         name="answer",
         label=plain(label) if label is not None else None,
         suffix=plain(suffix) if suffix is not None else None,
+        width_chars=width_chars,
     )
     return ParsedQuestion(
         title="Q",
@@ -196,12 +197,38 @@ def test_selector_draw_border_block_uses_run_border_not_table(starter_template):
     assert any("Beta" in p for p in paragraphs)
 
 
-def test_fill_in_no_label_falls_back_to_answer_prefix(starter_template):
+def test_fill_in_no_label_has_no_prefix_by_default(starter_template):
+    """No source-HTML label and no configured `default_label` must mean no
+    prefix at all (not the old hardcoded "Answer:") - a default an instructor
+    can't turn off isn't a real default."""
     tpl = _tpl(starter_template)
     element_config = ElementConfig(preferences={}, behavior_class={})
     ctx = build_question_context(tpl, _string_question(), 1, element_config)
     text = _text(ctx["question_contents"])
-    assert "Answer: " in text
+    assert "Answer" not in text
+
+
+def test_fill_in_no_label_uses_configured_default_label(starter_template):
+    tpl = _tpl(starter_template)
+    element_config = ElementConfig(
+        preferences={"string_input": FillInPreferences(default_label="Answer:")},
+        behavior_class={},
+    )
+    ctx = build_question_context(tpl, _string_question(), 1, element_config)
+    text = _text(ctx["question_contents"])
+    assert "Answer:" in text
+
+
+def test_fill_in_configured_default_label_ignored_when_widget_has_own_label(starter_template):
+    tpl = _tpl(starter_template)
+    element_config = ElementConfig(
+        preferences={"string_input": FillInPreferences(default_label="Answer:")},
+        behavior_class={},
+    )
+    ctx = build_question_context(tpl, _string_question(label="pH ="), 1, element_config)
+    text = _text(ctx["question_contents"])
+    assert "pH =" in text
+    assert "Answer:" not in text
 
 
 def test_fill_in_label_and_suffix_used(starter_template):
@@ -212,6 +239,77 @@ def test_fill_in_label_and_suffix_used(starter_template):
     assert "pH =" in text
     assert "units" in text
     assert "Answer:" not in text
+
+
+def test_fill_in_blank_width_matches_widget_width_chars(starter_template):
+    """The blank's underscore count should reflect the source element's own
+    `size` attribute (`Widget.width_chars`), not the old fixed 20-char blank."""
+    tpl = _tpl(starter_template)
+    element_config = ElementConfig(preferences={}, behavior_class={})
+    ctx = build_question_context(tpl, _string_question(width_chars=8), 1, element_config)
+    blank_run = next(
+        r for p in ctx["question_contents"].paragraphs for r in p.runs if set(r.text.strip()) == {"_"}
+    )
+    assert blank_run.text.strip() == "_" * 8
+
+
+def test_fill_in_blank_width_falls_back_when_no_width_chars(starter_template):
+    tpl = _tpl(starter_template)
+    element_config = ElementConfig(preferences={}, behavior_class={})
+    ctx = build_question_context(tpl, _string_question(), 1, element_config)
+    blank_run = next(
+        r for p in ctx["question_contents"].paragraphs for r in p.runs if set(r.text.strip()) == {"_"}
+    )
+    assert blank_run.text.strip() == "_" * 20
+
+
+def test_fill_in_blank_width_clamped_to_reasonable_bounds(starter_template):
+    tpl = _tpl(starter_template)
+    element_config = ElementConfig(preferences={}, behavior_class={})
+    ctx = build_question_context(tpl, _string_question(width_chars=1), 1, element_config)
+    blank_run = next(
+        r for p in ctx["question_contents"].paragraphs for r in p.runs if set(r.text.strip()) == {"_"}
+    )
+    assert len(blank_run.text.strip()) >= 5
+
+
+def test_fill_in_bordered_blank_gets_enlarged_font_size(starter_template):
+    """A draw-border'd fill-in widget's blank line should render at an
+    enlarged font size (confirmed by the user: the run-level border sits
+    tight against normal-size text, cramping handwritten answers) - label/
+    suffix text stays at the paragraph's normal size, only the blank itself
+    is enlarged."""
+    tpl = _tpl(starter_template)
+    element_config = ElementConfig(
+        preferences={"string_input": FillInPreferences(draw_border=True)},
+        behavior_class={},
+    )
+    ctx = build_question_context(
+        tpl, _string_question(label="pH =", suffix="units"), 1, element_config
+    )
+    blank_run = next(
+        r for p in ctx["question_contents"].paragraphs for r in p.runs if set(r.text.strip()) == {"_"}
+    )
+    assert blank_run.font.size is not None
+    assert blank_run.font.size.pt == 20
+
+    other_runs = [
+        r
+        for p in ctx["question_contents"].paragraphs
+        for r in p.runs
+        if r.text.strip() in ("pH =", "units")
+    ]
+    assert other_runs and all(r.font.size is None for r in other_runs)
+
+
+def test_fill_in_blank_not_enlarged_without_draw_border(starter_template):
+    tpl = _tpl(starter_template)
+    element_config = ElementConfig(preferences={}, behavior_class={})
+    ctx = build_question_context(tpl, _string_question(), 1, element_config)
+    blank_run = next(
+        r for p in ctx["question_contents"].paragraphs for r in p.runs if set(r.text.strip()) == {"_"}
+    )
+    assert blank_run.font.size is None
 
 
 def test_fill_in_template_display_routes_to_answer_element(starter_template):
@@ -1052,7 +1150,8 @@ def test_block_fill_in_gets_leading_break_when_reusing_content(starter_template)
     tpl = _tpl(starter_template)
     list_formats = create_list_formats(tpl)
     element_config = ElementConfig(
-        preferences={"integer_input": FillInPreferences(display="block")}, behavior_class={}
+        preferences={"integer_input": FillInPreferences(display="block", default_label="Answer:")},
+        behavior_class={},
     )
     ctx = build_question_context(tpl, question, 1, element_config, list_formats=list_formats)
 
