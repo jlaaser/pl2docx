@@ -321,6 +321,17 @@ def test_fill_in_template_display_routes_to_answer_element(starter_template):
     ctx = build_question_context(tpl, _string_question(label="pH =", suffix="units"), 1, element_config)
     assert "pH =" not in _text(ctx["question_contents"])
     assert "pH =" in _text(ctx["answer_element"])
+    assert ctx["has_answer_element"] is True
+
+
+def test_has_answer_element_false_when_no_widget_uses_template_display(starter_template):
+    """`has_answer_element` lets the template guard its `{{p question.answer_element }}`
+    tag so the common case (no `template`-display widget) doesn't leave a stray blank
+    paragraph behind - see build_question_context's docstring."""
+    tpl = _tpl(starter_template)
+    element_config = ElementConfig(preferences={}, behavior_class={})
+    ctx = build_question_context(tpl, _string_question(label="pH ="), 1, element_config)
+    assert ctx["has_answer_element"] is False
 
 
 def test_fill_in_none_display_generated_then_discarded(starter_template):

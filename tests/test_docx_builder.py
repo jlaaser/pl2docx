@@ -106,6 +106,49 @@ def test_render_document_zone_without_title_has_no_heading(starter_template, tmp
     assert heading_paragraphs == []
 
 
+def test_render_document_no_stray_blank_paragraphs_at_boundaries(starter_template, tmp_path):
+    """Regression: the starter template's control-flow tags (for/if/else/endfor)
+    previously left 2-5 stray blank paragraphs at every zone/question boundary,
+    since a plain (un-prefixed) {% %} control tag's own paragraph survives
+    rendering as a real empty <w:p> unless specially handled - confirmed fixed by
+    switching every one of them to docxtpl's paragraph-consuming {%p %} syntax
+    (see starter_template.py's module docstring for the full mechanism/why).
+    Also covers a related but separate bug found while writing this test: a
+    block-display widget with nothing after it left its own trailing empty
+    paragraph inside question_contents itself (fixed in element_renderer.py's
+    _trim_trailing_empty_paragraph, not a template issue).
+
+    This fixture exercises every boundary type the user reported: before the
+    zone loop, zone heading -> first question, question content -> answer key,
+    and end of one zone's last question -> the next zone's heading. None of
+    this fixture's real content is legitimately blank, so no paragraph in the
+    rendered output should be empty."""
+    output_path = tmp_path / "key.docx"
+    zones = [
+        {
+            "title": "Zone One",
+            "questions": [(_mc_question(blank=False), 1)],
+        },
+        {
+            "title": "Zone Two",
+            "questions": [(_integer_question(blank=False), 2)],
+        },
+    ]
+    render_document(starter_template, zones, is_answer_key=True, output_path=output_path)
+
+    doc = Document(str(output_path))
+    texts = [p.text for p in doc.paragraphs]
+    assert all(t.strip() for t in texts), f"found blank paragraph(s): {texts}"
+
+    # Sanity-check the boundaries are actually adjacent to real content, not
+    # just "no blanks anywhere" by coincidence of a lucky paragraph count.
+    zone_one_idx = texts.index("Zone One")
+    zone_two_idx = texts.index("Zone Two")
+    assert texts[zone_one_idx - 1].startswith("Instructions:")
+    assert texts[zone_one_idx + 1].startswith("1. MC Question")
+    assert texts[zone_two_idx + 1].startswith("2. Integer Question")
+
+
 def test_render_document_unreadable_template_raises_clear_error(tmp_path):
     """Regression: a template open in Word (or mid-cloud-sync) fails with a cryptic
     docx.opc.exceptions.PackageNotFoundError deep inside docxtpl's subdoc creation.

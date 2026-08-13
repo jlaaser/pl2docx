@@ -370,13 +370,20 @@ def build_question_context(
     dict
         `{"number", "title", "qid", "points_numeric", "points_text",
         "question_contents", "answer_contents", "answer_space",
-        "answer_element"}` — the per-question shape
+        "answer_element", "has_answer_element"}` — the per-question shape
         `pl2docx.docx_builder.render_document`'s template context expects.
         `answer_element` holds any widget whose resolved `display` is
         `"template"`, rendered in `"block"` form, in source order; empty
         (but always present) when no widget uses `template` display.
+        `has_answer_element` is `True` only when at least one widget actually
+        used `template` display — lets the template guard its
+        `{{p question.answer_element }}` tag behind
+        `{% if question.has_answer_element %}` so an unused `answer_element`
+        (the common case) doesn't leave a stray empty paragraph behind, since
+        an empty `Subdoc` still splices in as one blank paragraph rather than
+        vanishing entirely.
     """
-    question_contents, answer_element = _build_question_contents(
+    question_contents, answer_element, has_answer_element = _build_question_contents(
         tpl, question, element_config, image_base_dir, list_formats
     )
     return {
@@ -389,6 +396,7 @@ def build_question_context(
         "answer_contents": _build_answer_contents(tpl, question, image_base_dir, list_formats),
         "answer_space": _build_answer_space(tpl),
         "answer_element": answer_element,
+        "has_answer_element": has_answer_element,
     }
 
 
@@ -404,13 +412,15 @@ def _build_question_contents(
     list_num_ids = _ListNumIds(list_formats) if list_formats is not None else None
 
     state = {"paragraph": subdoc.add_paragraph(), "in_list_item": False}
+    has_answer_element = False
 
     def append_nodes(nodes: list[ContentNode]) -> None:
         _render_nodes_into_subdoc(state, subdoc, nodes, image_base_dir, list_num_ids)
 
     if not question.widgets:
         append_nodes(question.prompt_segments[0] if question.prompt_segments else [])
-        return subdoc, answer_element
+        _trim_trailing_empty_paragraph(subdoc)
+        return subdoc, answer_element, has_answer_element
 
     for i, widget in enumerate(question.widgets):
         # Any ListItemStart/ListItemEnd trailing/leading this segment is
@@ -443,6 +453,8 @@ def _build_question_contents(
                 else _render_fill_in_inline(state["paragraph"], widget, prefs, image_base_dir)
             )
         else:  # "block" or "template"
+            if display == "template":
+                has_answer_element = True
             target = answer_element if display == "template" else subdoc
             # Reuse the current (already list-numbered) paragraph as this
             # widget's first line/option when we're mid-list-item - a real
@@ -484,7 +496,30 @@ def _build_question_contents(
                 _add_run_border(run)
 
     append_nodes(question.prompt_segments[-1])
-    return subdoc, answer_element
+    _trim_trailing_empty_paragraph(subdoc)
+    return subdoc, answer_element, has_answer_element
+
+
+def _trim_trailing_empty_paragraph(subdoc) -> None:
+    """Drop a genuinely-empty trailing paragraph from `subdoc`, if any.
+
+    A block-display widget always ends its own line by starting a *fresh*
+    paragraph for whatever comes next (the `state["paragraph"] =
+    subdoc.add_paragraph()` call above) - when that widget is the *last*
+    thing in the question (nothing left to fill that fresh paragraph), it's
+    pure artifact, not real content, and would otherwise splice into
+    `question_contents` as a stray blank paragraph (confirmed: this, not a
+    template/Jinja issue, was the source of a residual blank line the
+    starter template's own `{%p %}` control-flow fix didn't - and
+    shouldn't have - touched). Never removes `subdoc`'s only paragraph, even
+    if it's empty - only a genuinely superfluous *trailing extra* one.
+    """
+    paragraphs = subdoc.paragraphs
+    if len(paragraphs) <= 1:
+        return
+    last = paragraphs[-1]
+    if not last.runs:
+        last._p.getparent().remove(last._p)
 
 
 def _append_run_text(

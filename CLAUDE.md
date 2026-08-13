@@ -268,7 +268,48 @@ Current structure:
 │   │                               #   generates an editable example instructor template (zones/
 │   │                               #   questions loop + named "pl2docx ..." styles + an
 │   │                               #   {{p question.answer_element }} tag), via python-docx (not
-│   │                               #   committed as a binary - same reasoning as test fixtures)
+│   │                               #   committed as a binary - same reasoning as test fixtures).
+│   │                               #   Default formatting (confirmed with the user, targeting
+│   │                               #   planning_notes/reference_examples/MT1_A_KEY.pdf's look, not
+│   │                               #   an exact match): "Normal" itself is overridden to black
+│   │                               #   Times New Roman 12pt, single line spacing, no bold/italic/
+│   │                               #   underline - the only exceptions are the assessment title/
+│   │                               #   zone heading (16pt) and the "SOLUTION:" label (bold, a
+│   │                               #   run-level override). "pl2docx Question Title"/"pl2docx QID
+│   │                               #   Reference" get no overrides at all now, existing purely as
+│   │                               #   named customization hooks. All 4 custom styles set
+│   │                               #   base_style = Normal explicitly - python-docx custom styles
+│   │                               #   don't inherit Normal by default (confirmed: base_style is
+│   │                               #   None unless set), so skipping this silently falls back to
+│   │                               #   Word's own Calibri-11 theme default instead of the
+│   │                               #   overridden Normal. Every for/if/else/endfor control-flow
+│   │                               #   tag uses docxtpl's `{%p ... %}` paragraph-consuming prefix
+│   │                               #   (not plain `{% %}`, not Jinja `{%- -%}` whitespace-trim) -
+│   │                               #   confirmed the hard way this session: a plain control tag's
+│   │                               #   own paragraph survives rendering as a real empty `<w:p>`
+│   │                               #   (2-5 stray blanks per zone/question boundary in a real
+│   │                               #   render), and naively trimming one adjacent to a `{{p ...}}`
+│   │                               #   subdoc tag corrupts that tag's own paragraph-stripping
+│   │                               #   regex (docxtpl's `patch_xml` runs trim-merging *before*
+│   │                               #   `{{p }}`-paragraph-stripping), producing a
+│   │                               #   `TemplateSyntaxError` with no indication of the real cause.
+│   │                               #   `{%p if %}`/`{%p endif %}`/`{%p for %}`/`{%p endfor %}` sidestep
+│   │                               #   this entirely (verified safe directly adjacent to `{{p }}`
+│   │                               #   tags on both sides, and against a table in one `{%p if %}`
+│   │                               #   branch) - see the module's own docstring for the full
+│   │                               #   mechanism. The `is_answer_key`/QID pair is the one exception
+│   │                               #   left on `{%- -%}` trim (predates this session, real content
+│   │                               #   on both sides, not `{{p }}` tags, so it's safe and already
+│   │                               #   proven working). A related-but-distinct bug found writing
+│   │                               #   this session's regression test: `element_renderer.py`'s
+│   │                               #   `_build_question_contents` always started a *fresh* paragraph
+│   │                               #   after a block-display widget - harmless when more content
+│   │                               #   follows, but a stray trailing empty paragraph when that
+│   │                               #   widget was the question's last content. Fixed via
+│   │                               #   `_trim_trailing_empty_paragraph`, applied in both
+│   │                               #   `_build_question_contents` return paths (the normal one and
+│   │                               #   the zero-widget fast path) - not a template/Jinja issue, so
+│   │                               #   it lives in element_renderer.py, not here.
 │   └── render.py                  # CLI entry point (python -m pl2docx.render / `pl2docx-render`) -
 │                                   #   renders one fetch.py output/<instance>/ dir (using its
 │                                   #   structure.json for zone/question order) into blank+key docx;
