@@ -10,6 +10,7 @@ anything real - a stub with no cookies is enough.
 
 import functools
 import http.server
+import re
 import threading
 
 import pytest
@@ -121,6 +122,48 @@ def test_explicit_hide_selectors_shrink_the_captured_container(start_server, tmp
     hidden_png = next(files_dir.glob("1_*.png"))
     visible_png = next(files_dir.glob("2_*.png"))
     assert _png_height(hidden_png) < _png_height(visible_png)
+
+
+def test_default_container_guess_prefers_canvas_wrap_over_root(start_server, tmp_path):
+    """Fully-default preferences (container_selector AND hide_selectors both None)
+    must select the tighter `.fake-widget-canvas-wrap`, not the whole `.fake-widget`
+    root - excluding the toolbar entirely this way should produce the same
+    (shorter) height as explicitly hiding the toolbar within the root container."""
+    url = start_server(_FIXTURE_HTML)
+    files_dir = tmp_path / "files"
+
+    fully_default = {"fake-widget": InteractivePreferences()}
+    root_with_explicit_hide = {
+        "fake-widget": InteractivePreferences(
+            container_selector=".fake-widget", hide_selectors=[".fake-widget-toolbar"]
+        )
+    }
+
+    capture_interactive_elements(_StubClient(), _FIXTURE_HTML, url, files_dir, 1, fully_default)
+    capture_interactive_elements(_StubClient(), _FIXTURE_HTML, url, files_dir, 2, root_with_explicit_hide)
+
+    default_png = next(files_dir.glob("1_*.png"))
+    hidden_root_png = next(files_dir.glob("2_*.png"))
+    assert _png_height(default_png) == _png_height(hidden_root_png)
+
+
+def test_captured_image_gets_upscaled_width_attribute(start_server, tmp_path):
+    """The replacement <img> must carry a `width` attribute derived from the
+    captured element's own CSS bounding box (times _EMBED_SCALE) - not be left
+    unset (which would silently fall back to element_renderer's fixed 3in
+    default, too small for a diagram meant to be a question's main content)."""
+    url = start_server(_FIXTURE_HTML)
+    files_dir = tmp_path / "files"
+    interactive_tags = {"fake-widget": InteractivePreferences(container_selector=".fake-widget-canvas-wrap")}
+
+    result = capture_interactive_elements(_StubClient(), _FIXTURE_HTML, url, files_dir, 1, interactive_tags)
+
+    match = re.search(r'width="(\d+)"', result)
+    assert match is not None
+    width_px = int(match.group(1))
+    # The canvas itself is 100px wide; the wrapping div is at least that wide,
+    # and _EMBED_SCALE (1.25) must have been applied on top of it.
+    assert width_px >= round(100 * canvas_capture_module._EMBED_SCALE)
 
 
 def test_default_hide_selector_guess_matches_toolbar_suffix(start_server, tmp_path):

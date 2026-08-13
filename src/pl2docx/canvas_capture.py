@@ -11,14 +11,24 @@ attached), not something that can be replayed from already-saved static HTML.
 Confirmed real DOM shape (`pl-lewisstructure`/`pl-orbitaldiagram`, both course-authored
 fabric.js elements in `pl-pitt-chem0110`): each wraps itself in a root `<div>` whose
 class is exactly its own tag name (`.pl-lewisstructure`/`.pl-orbitaldiagram`), with a
-sibling toolbar/controls block only present on the interactive question panel. Core PL's
-`pl-drawing` does **not** follow the "container class == tag name" convention
-(`.pl-drawing-container`, not `.pl-drawing`) - confirming this default guess (used by
-`pl2docx.element_config.additional_interactive_tags` when `container_selector` isn't
-explicitly configured) isn't universal, hence the explicit-override escape hatch.
-Canvas init in both confirmed elements is a synchronous inline `<script>` immediately
-after the element's markup (no async gap, no ready-event) - a plain `page.goto(url)`
-(default `"load"` wait) is sufficient.
+sibling toolbar/controls block only present on the interactive question panel, and a
+narrower `<div class="{tag}-canvas-wrap">` around just the `<canvas>` itself (confirmed
+in both elements, under exactly that name). Core PL's `pl-drawing` does **not** follow
+either convention (`.pl-drawing-container` root, no `-canvas-wrap` at all) - confirming
+neither default guess is universal, hence the explicit-override escape hatch. Canvas
+init in both confirmed elements is a synchronous inline `<script>` immediately after
+the element's markup (no async gap, no ready-event) - a plain `page.goto(url)` (default
+`"load"` wait) is sufficient.
+
+**Container selection prefers the tight `-canvas-wrap`, not the whole root.**
+Screenshotting the root container (this module's original approach) included
+whatever horizontal space the surrounding flex/JS layout reserved for the toolbar -
+confirmed real bug: hiding the toolbar via `display:none` doesn't shrink space a
+layout already computed for it before the hide ran, leaving a visible blank strip in
+the captured image. `_resolve_container_matches` tries `.{tag}-canvas-wrap` first,
+falling back to `.{tag}` only if that narrower selector matches nothing (e.g. a
+future element without this convention) - an explicit `container_selector` bypasses
+both and is used as-is.
 
 **Guaranteed replacement, success or failure**: every matched container is *always*
 replaced with an `<img>` tag before this module returns - a real one
@@ -66,9 +76,33 @@ _SCREENSHOT_TIMEOUT_MS = 20_000
 #: non-matching candidate is a harmless no-op.
 _DEFAULT_HIDE_SUFFIXES = ["-toolbar", "-toolbars", "-controls", "-sidebar"]
 
+#: Candidate container selectors tried, in order, when `InteractivePreferences.
+#: container_selector` isn't explicitly configured - the narrower `-canvas-wrap`
+#: (confirmed real convention, wraps just the <canvas>, excludes toolbar-reserved
+#: layout space) is preferred over the bare tag-name root. The first candidate that
+#: matches anything on the page wins - not merged/tried-all like hide suffixes,
+#: since these are alternative selections of the *same* thing, not independent
+#: elements to hide.
+_DEFAULT_CONTAINER_SUFFIXES = ["-canvas-wrap", ""]
+
 _PLACEHOLDER_ALT = "[interactive content unavailable]"
 
 _HIDE_JS = "els => els.forEach(el => el.style.display = 'none')"
+
+#: Rasterization resolution (screenshot px per CSS px, via device_scale_factor -
+#: same mapping `pl2docx.svg_render` uses) - controls raster sharpness only, giving
+#: the instructor headroom to enlarge the embedded image in Word without visible
+#: pixelation. Independent of the embed's physical size, which comes from the
+#: captured element's own CSS bounding box (times `_EMBED_SCALE`) - not from this.
+_DEFAULT_DPI = 600
+_CSS_PX_PER_INCH = 96
+
+#: How much larger than the captured element's own natural on-page CSS size to embed
+#: it at by default (set via the generated `<img width>` attribute) - the user found
+#: the natural size (previously not set at all, silently falling back to
+#: `element_renderer._DEFAULT_IMAGE_WIDTH`'s fixed 3in) too small for a diagram meant
+#: to be the main content of its printed question.
+_EMBED_SCALE = 1.25
 
 
 def close_browser() -> None:
@@ -87,6 +121,23 @@ def _resolve_hide_selectors(tag: str, prefs: InteractivePreferences) -> list[str
     if prefs.hide_selectors is not None:
         return prefs.hide_selectors
     return [f".{tag}{suffix}" for suffix in _DEFAULT_HIDE_SUFFIXES]
+
+
+def _resolve_container_matches(
+    tag: str, prefs: InteractivePreferences, soup: BeautifulSoup
+) -> tuple[str, list]:
+    """Return `(selector, containers)` for the first candidate selector that matches
+    anything on the page - `(selector, [])` if none do (or the explicit
+    `container_selector`, whether or not it matches - so a real misconfiguration
+    still surfaces as "no match" rather than silently trying something else)."""
+    if prefs.container_selector:
+        return prefs.container_selector, soup.select(prefs.container_selector)
+    for suffix in _DEFAULT_CONTAINER_SUFFIXES:
+        selector = f".{tag}{suffix}"
+        containers = soup.select(selector)
+        if containers:
+            return selector, containers
+    return f".{tag}", []
 
 
 def capture_interactive_elements(
@@ -119,9 +170,11 @@ def capture_interactive_elements(
         from different questions never collide (same convention as
         `pl2docx.fetch._download_images`).
     interactive_tags : dict[str, InteractivePreferences]
-        PL element tag name -> resolved capture preferences (typically
-        `pl2docx.element_config.additional_interactive_tags`'s return value, which
-        has already defaulted `container_selector`).
+        PL element tag name -> capture preferences (typically
+        `pl2docx.element_config.additional_interactive_tags`'s return value).
+        `container_selector`/`hide_selectors` left `None` (not explicitly
+        configured) get this module's own default guesses - see
+        `_resolve_container_matches`/`_resolve_hide_selectors`.
 
     Returns
     -------
@@ -132,11 +185,11 @@ def capture_interactive_elements(
         failure, and never leaves raw markup behind.
     """
     soup = BeautifulSoup(html, "html.parser")
-    per_tag_matches = {
-        tag: soup.select(prefs.container_selector or f".{tag}")
-        for tag, prefs in interactive_tags.items()
-    }
-    per_tag_matches = {tag: containers for tag, containers in per_tag_matches.items() if containers}
+    per_tag_matches = {}
+    for tag, prefs in interactive_tags.items():
+        selector, containers = _resolve_container_matches(tag, prefs, soup)
+        if containers:
+            per_tag_matches[tag] = (selector, containers)
     if not per_tag_matches:
         return html
 
@@ -144,13 +197,17 @@ def capture_interactive_elements(
 
     try:
         browser = get_browser()
-        context = browser.new_context()
+        # device_scale_factor gives a high-pixel-density raster (screenshot
+        # sharpness/re-scalability headroom in Word), independent of the embed's
+        # physical size on the page - that comes from the captured element's own
+        # CSS bounding box, set explicitly on the <img width> attribute below.
+        context = browser.new_context(device_scale_factor=_DEFAULT_DPI / _CSS_PX_PER_INCH)
         context.add_cookies(client.playwright_cookies())
         page = context.new_page()
         page.goto(page_url, timeout=_NAV_TIMEOUT_MS)
     except Exception as exc:
         logger.warning("Failed to load %s for interactive-element capture: %s", page_url, exc)
-        for containers in per_tag_matches.values():
+        for _selector, containers in per_tag_matches.values():
             for container in containers:
                 container.replace_with(_placeholder_img(soup))
         return str(soup)
@@ -158,10 +215,10 @@ def capture_interactive_elements(
     counter = 0
     try:
         for tag, prefs in interactive_tags.items():
-            containers = per_tag_matches.get(tag)
-            if not containers:
+            entry = per_tag_matches.get(tag)
+            if entry is None:
                 continue
-            selector = prefs.container_selector or f".{tag}"
+            selector, containers = entry
             for hide_selector in _resolve_hide_selectors(tag, prefs):
                 try:
                     page.locator(hide_selector).evaluate_all(_HIDE_JS)
@@ -171,12 +228,16 @@ def capture_interactive_elements(
                 local_name = f"{instance_question_id}_{counter}_{tag}.png"
                 counter += 1
                 try:
-                    page.locator(selector).nth(i).screenshot(
+                    locator = page.locator(selector).nth(i)
+                    box = locator.bounding_box(timeout=_SCREENSHOT_TIMEOUT_MS)
+                    locator.screenshot(
                         path=str(files_dir / local_name),
                         omit_background=True,
                         timeout=_SCREENSHOT_TIMEOUT_MS,
                     )
                     img_tag = soup.new_tag("img", src=f"files/{local_name}", alt=f"{tag} diagram")
+                    if box and box["width"] > 0:
+                        img_tag["width"] = str(round(box["width"] * _EMBED_SCALE))
                 except Exception as exc:
                     logger.warning(
                         "Failed to capture interactive element %r (instance_question %d): %s",

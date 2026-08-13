@@ -160,7 +160,10 @@ additional-elements:
     load_element_config(path)  # must not raise
 
 
-def test_additional_interactive_tags_defaults_container_selector(tmp_path):
+def test_additional_interactive_tags_leaves_unconfigured_selectors_unresolved(tmp_path):
+    """container_selector/hide_selectors stay None when not explicitly configured -
+    pl2docx.canvas_capture resolves its own default guesses (trying multiple
+    candidate selectors), so there's nothing meaningful to pre-resolve here."""
     path = _write(
         tmp_path,
         """
@@ -171,7 +174,7 @@ additional-elements:
     )
     config = load_element_config(path)
     resolved = additional_interactive_tags(config)
-    assert resolved["pl-orbitaldiagram"].container_selector == ".pl-orbitaldiagram"
+    assert resolved["pl-orbitaldiagram"].container_selector is None
     assert resolved["pl-orbitaldiagram"].hide_selectors is None
 
 

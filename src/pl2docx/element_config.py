@@ -123,12 +123,15 @@ class InteractivePreferences:
     ----------
     container_selector : str or None
         CSS selector (relative to the fetched page) identifying the DOM subtree to
-        screenshot and replace with the captured image. `None` means "not yet
-        resolved" — `additional_interactive_tags()` defaults it to `f".{tag}"` (class
-        matching the element's own tag name verbatim — confirmed real convention for
-        `pl-lewisstructure`/`pl-orbitaldiagram`, though **not** universal: core PL's
-        `pl-drawing` uses `.pl-drawing-container` instead, so an element that doesn't
-        follow this convention needs an explicit override here).
+        screenshot and replace with the captured image. `None` means "no explicit
+        config" — `pl2docx.canvas_capture._resolve_container_matches` tries a
+        `f".{tag}-canvas-wrap"` selector first (a narrower wrapper around just the
+        `<canvas>`, excluding toolbar-reserved layout space — confirmed real
+        convention for `pl-lewisstructure`/`pl-orbitaldiagram`), falling back to
+        `f".{tag}"` (the whole element) only if that narrower one matches nothing.
+        Neither is universal — core PL's `pl-drawing` uses `.pl-drawing-container`
+        with no `-canvas-wrap` at all — so an element that doesn't follow either
+        convention needs an explicit override here.
     hide_selectors : list[str] or None
         CSS selectors (relative to the page) to hide before screenshotting (e.g. a
         toolbar/controls div) — an explicit, possibly empty, list here fully replaces
@@ -339,16 +342,13 @@ def additional_interactive_tags(element_config: ElementConfig) -> dict[str, Inte
     Returns
     -------
     dict[str, InteractivePreferences]
-        Tag name -> preferences, with `container_selector` defaulted to `f".{tag}"`
-        when not explicitly configured (`None`). `hide_selectors` is passed through
-        as-is (`None` left for the caller, `pl2docx.canvas_capture`, to interpret as
-        "fall back to its own default candidate guesses" - see that module). Meant to
-        be passed straight through to `pl2docx.canvas_capture.capture_interactive_elements`.
+        Tag name -> preferences, unchanged from what `config.yaml` declared -
+        `container_selector`/`hide_selectors` are passed through as-is, `None` left
+        for the caller (`pl2docx.canvas_capture`) to interpret as "fall back to my
+        own default candidate guesses" (it tries several selectors per tag, not a
+        single fixed default, so resolving one here wouldn't be meaningful - see
+        that module's `_resolve_container_matches`/`_resolve_hide_selectors`). Meant
+        to be passed straight through to
+        `pl2docx.canvas_capture.capture_interactive_elements`.
     """
-    return {
-        tag: InteractivePreferences(
-            container_selector=prefs.container_selector or f".{tag}",
-            hide_selectors=prefs.hide_selectors,
-        )
-        for tag, prefs in element_config.interactive_preferences.items()
-    }
+    return dict(element_config.interactive_preferences)
