@@ -186,6 +186,32 @@ def test_default_hide_selector_guess_matches_toolbar_suffix(start_server, tmp_pa
     assert _png_height(guessed_png) < _png_height(visible_png)
 
 
+def test_sibling_toolbar_removed_from_saved_html_not_just_screenshot(start_server, tmp_path):
+    """Regression: with the default container_selector (`.fake-widget-canvas-wrap`,
+    deliberately narrower than the root - see the module docstring's "canvas-wrap"
+    note), the toolbar is a *sibling* of the captured container, not a descendant of
+    it - so replacing the container with an <img> never touches the toolbar at all.
+    hide_selectors (explicit or default-guessed) previously only hid the toolbar via
+    `display:none` on the *live page*, for the screenshot's own visual content - the
+    raw toolbar markup silently survived into the *returned* HTML string, where
+    html_parser.py's generic-tag walk would recurse into it and leak stray
+    button-label text into the rendered prompt. Must be stripped from the saved HTML
+    too, regardless of whether hide_selectors was explicitly configured or
+    default-guessed."""
+    url = start_server(_FIXTURE_HTML)
+    files_dir = tmp_path / "files"
+
+    explicit_hide = {"fake-widget": InteractivePreferences(hide_selectors=[".fake-widget-toolbar"])}
+    result = capture_interactive_elements(_StubClient(), _FIXTURE_HTML, url, files_dir, 1, explicit_hide)
+    assert "Hidden button" not in result
+    assert "fake-widget-toolbar" not in result
+
+    default_guess = {"fake-widget": InteractivePreferences()}
+    result2 = capture_interactive_elements(_StubClient(), _FIXTURE_HTML, url, files_dir, 2, default_guess)
+    assert "Hidden button" not in result2
+    assert "fake-widget-toolbar" not in result2
+
+
 def test_capture_failure_produces_placeholder_not_raw_markup(start_server, tmp_path, monkeypatch):
     """A container present in the static HTML but absent from the live page (e.g. a
     stale/broken selector) must degrade to the empty-src placeholder <img> - never

@@ -189,6 +189,26 @@ def capture_interactive_elements(
     if not per_tag_matches:
         return html
 
+    # Strip hide_selectors matches from the *saved* HTML unconditionally, before
+    # any capture attempt - not just on the live page (further down, for the
+    # screenshot's own visual content). The captured container defaults to the
+    # narrower `-canvas-wrap` selector specifically to exclude the toolbar (see
+    # this module's docstring), which means the toolbar is a *sibling* the
+    # container-replacement step below never touches at all - confirmed real
+    # bug: hide_selectors (explicit or default-guessed) only ever hid the
+    # toolbar for the screenshot via `display:none` on the live page, while the
+    # raw toolbar markup silently survived into the returned HTML string,
+    # where html_parser.py's generic-tag walk would recurse into it and leak
+    # stray button-label text into the rendered prompt - exactly the leakage
+    # this module's "always replace the container" policy was meant to prevent
+    # in the first place, just for a sibling element instead of the container.
+    for tag, prefs in interactive_tags.items():
+        if tag not in per_tag_matches:
+            continue
+        for hide_selector in _resolve_hide_selectors(tag, prefs):
+            for element in soup.select(hide_selector):
+                element.decompose()
+
     files_dir.mkdir(parents=True, exist_ok=True)
 
     try:
