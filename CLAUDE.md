@@ -96,6 +96,21 @@ Current structure:
 │   │                               #   loads config.yaml's global-element-preferences/
 │   │                               #   additional-elements sections; all keys optional, built-in
 │   │                               #   defaults apply when absent
+│   ├── latex_math.py              # Phase 4 increment 3: render_math_png() - compiles raw LaTeX
+│   │                               #   (MathRef.latex) to a print-resolution PNG via a real
+│   │                               #   pdflatex + pdftoppm (poppler-utils) subprocess pipeline, not
+│   │                               #   a pure-Python LaTeX->OMML converter - chosen specifically so
+│   │                               #   the course's mhchem \ce{...} chemistry notation (confirmed
+│   │                               #   real usage in chemutils/compounds.py et al.) "just works"
+│   │                               #   with zero special-casing, since it's genuine LaTeX. Raises
+│   │                               #   LatexRenderError (missing pdflatex/pdftoppm, compile failure,
+│   │                               #   timeout) so element_renderer.py can fall back to placeholder
+│   │                               #   "$latex$" text rather than fail the whole render. Requires a
+│   │                               #   local TeX distribution (e.g. MiKTeX/TeX Live, with amsmath/
+│   │                               #   amssymb/mhchem/standalone) + poppler-utils - not a pinned
+│   │                               #   Python dependency like the rest of this project's deps.
+│   │                               #   Results are cached per-process (module-level dict + temp
+│   │                               #   dir), keyed by (latex, display_mode, font_size_pt, dpi).
 │   ├── element_renderer.py        # build_question_context() - one ParsedQuestion + ElementConfig ->
 │   │                               #   the 4 Subdocs (question_contents/answer_contents/answer_space/
 │   │                               #   answer_element) + qid/points a question's Jinja context needs.
@@ -104,6 +119,11 @@ Current structure:
 │   │                               #   config-driven list-style/bold-correct/display/draw-border per
 │   │                               #   widget. display="template" routes a widget's block-rendered
 │   │                               #   content into answer_element instead of question_contents.
+│   │                               #   Phase 4 increment 3: MathRef nodes render via
+│   │                               #   latex_math.render_math_png(), embedded as a real inline
+│   │                               #   picture (reusing the same _render_image() path ImageRef uses,
+│   │                               #   with default_width=None so python-docx auto-sizes from the
+│   │                               #   PNG's own DPI metadata instead of a fixed fallback width).
 │   ├── docx_builder.py            # render_document() - assembles the zones/questions context and
 │   │                               #   calls docxtpl render/save; does NO per-element formatting
 │   │                               #   itself (see element_renderer.py) - document *layout* lives in
@@ -290,8 +310,18 @@ Update this repository structure description as needed when significant changes 
      full context shape (zone titles, question number/title/points/qid, the four
      subdoc insertions including `answer_element`, an `is_answer_key` branch) with
      named "pl2docx ..." styles ready to restyle in Word.
-   - Math/rich-HTML prompt formatting and image embedding remain Phase 4 (raw LaTeX
-     and dropped images are still visible in current output — known, not a bug).
+   - Rich-HTML prompt formatting (bold/italic/underline/lists, Phase 4 increment 1),
+     image embedding (increment 2), and math rendering (increment 3, **done**) are all
+     implemented. Math renders via `latex_math.py`'s real `pdflatex`+`pdftoppm`
+     pipeline rather than a pure-Python LaTeX→OMML converter — chosen specifically
+     because this course's content uses the `mhchem` package's `\ce{...}` macro for
+     chemical formulas (confirmed in `chemutils/compounds.py` et al.), which
+     general-purpose LaTeX→MathML libraries don't implement; compiling through real
+     LaTeX means it "just works" with no subset to maintain, at the cost of
+     non-editable (image, not native Word-equation) math output and requiring a local
+     TeX distribution + poppler-utils. Falls back to placeholder `$latex$` text
+     (unchanged from pre-increment-3 behavior) when no LaTeX install is available or a
+     given snippet fails to compile — see `latex_math.py`'s repo-structure entry above.
 
 ## Extensibility
 
@@ -313,6 +343,13 @@ not guessed at up front.
   doesn't fit docxtpl's Jinja-style model) + **docxcompose** (docxtpl's subdoc feature
   requires it). See the `{{p content }}` gotcha noted under Repository structure.
 - Headless browser tooling for the `pl-drawing` fallback: **Playwright**.
+- Math rendering (`latex_math.py`): requires a local **TeX distribution**
+  (`pdflatex` on `PATH`, with `amsmath`/`amssymb`/`mhchem`/`standalone` available -
+  MiKTeX confirmed installed and working on this machine, `MiKTeX-pdfTeX 4.27`) plus
+  **poppler-utils** (`pdftoppm` on `PATH`, confirmed `24.04.0`) for PDF->PNG
+  rasterization. Not a pinned Python dependency — `pl2docx` degrades gracefully
+  (placeholder `$latex$` text) when either is missing, so this is a "nice to have
+  for real math output" prerequisite, not a hard install requirement.
 - **Local PrairieLearn Server**: a local PrairieLearn dev instance
   is running via wsl and Docker at http://localhost:3000/.  If this does not load, it can be restarted by running `docker run -it --rm -p 3000:3000 -v ~/pl-pitt-chem0110:/course prairielearn/prairielearn` in wsl.  If this fails, ask for help - it may require the user to perform a manual restart.
   - **Confirmed gotcha (2026-08-12), fixed structurally the same day: every restart

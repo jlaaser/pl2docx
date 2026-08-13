@@ -76,6 +76,28 @@ def test_multiple_choice_hidden_answer_key():
     assert q.points == "2"
 
 
+def test_math_blank():
+    q = parse_instance_question_html(_load("math_blank.html"))
+    all_nodes = [n for seg in q.prompt_segments for n in seg]
+    math_nodes = [n for n in all_nodes if isinstance(n, MathRef)]
+    assert [(n.latex, n.display_mode) for n in math_nodes] == [
+        ("\\ce{CH4 + O2 -> CO2 + H2O}", False),
+        ("PV = nRT", False),
+        ("n", False),
+        ("n = \\frac{PV}{RT}", True),
+    ]
+    assert q.widgets[0].kind == "number_input"
+
+
+def test_math_key():
+    q = parse_instance_question_html(_load("math_key.html"))
+    answer_math = [n for n in q.answer_panel_text if isinstance(n, MathRef)]
+    assert [(n.latex, n.display_mode) for n in answer_math] == [
+        ("\\ce{CH4 + 2O2 -> CO2 + 2H2O}", False),
+        ("n = 0.041", False),
+    ]
+
+
 def test_checkbox_blank():
     q = parse_instance_question_html(_load("checkbox_blank.html"))
     widget = q.widgets[0]
@@ -498,6 +520,33 @@ def test_prompt_paragraphs_and_list_preserved():
     assert any(isinstance(n, ListItemStart) for n in nodes)
 
 
+def test_adjacent_p_tags_produce_single_paragraph_break():
+    """Regression: whitespace-only text between "</p>" and the next "<p>"
+    (ordinary source-formatting indentation) must not defeat the
+    consecutive-ParagraphBreak collapse - confirmed by the user against real
+    multi-paragraph answer-key content: this used to produce TWO
+    ParagraphBreak nodes (an extra blank paragraph once rendered) instead of
+    one."""
+    from pl2docx.html_parser import ParagraphBreak
+
+    html = """
+    <div class="question-block">
+      <div class="card-header"><h1>Adjacent paragraphs</h1></div>
+      <div class="card-body question-body">
+        <p>First paragraph.</p>
+        <p>Second paragraph.</p>
+        <span class="input-group pl-integer-input">
+          <input class="form-control pl-integer-input-input" name="answer" type="text">
+        </span>
+      </div>
+    </div>
+    """
+    q = parse_instance_question_html(html)
+    nodes = q.prompt_segments[0]
+    break_count = sum(1 for n in nodes if isinstance(n, ParagraphBreak))
+    assert break_count == 1
+
+
 def test_ordered_list_gets_position_and_ordered_flag():
     """<ol> items must carry ordered=True and their 1-based position, not just
     a flat unordered bullet - real course content (answer-panel explanations)
@@ -622,10 +671,10 @@ def test_image_missing_or_unparseable_width_gives_none():
     assert images[0].width_px is None
 
 
-def test_prompt_image_and_math_recognized_but_not_yet_rendered():
-    """Phase 4 increment 1 scope: the walker recognizes <img> as an ImageRef and
-    keeps raw $...$/$$...$$ math text as plain text (increments 2/3 handle real
-    embedding/OMML conversion) - both must be recognized, not silently dropped."""
+def test_prompt_image_and_math_recognized():
+    """The walker recognizes <img> as an ImageRef and $...$ math text as a
+    MathRef (increment 3a: detection only - real OMML/image rendering is a
+    later increment, see element_renderer's placeholder MathRef branch)."""
     html = """
     <div class="question-block">
       <div class="card-header"><h1>Image and math</h1></div>
@@ -643,9 +692,56 @@ def test_prompt_image_and_math_recognized_but_not_yet_rendered():
     assert len(images) == 1
     assert images[0].local_path == "files/1_0_diagram.png"
     assert images[0].alt == "a diagram"
-    # Math detection itself is increment 3 scope - raw delimiters stay literal text for now.
-    assert "$x^2$" in plain_text(nodes)
-    assert not any(isinstance(n, MathRef) for n in nodes)
+    math_nodes = [n for n in nodes if isinstance(n, MathRef)]
+    assert len(math_nodes) == 1
+    assert math_nodes[0].latex == "x^2"
+    assert math_nodes[0].display_mode is False
+
+
+def test_math_delimiter_variants():
+    html = """
+    <div class="question-block">
+      <div class="card-header"><h1>Math delimiters</h1></div>
+      <div class="card-body question-body">
+        <p>Inline $x^2$, alt-inline \\(y^2\\), display $$a+b$$, alt-display \\[c+d\\], escaped \\$5.</p>
+        <span class="input-group pl-integer-input">
+          <input class="form-control pl-integer-input-input" name="answer" type="text">
+        </span>
+      </div>
+    </div>
+    """
+    q = parse_instance_question_html(html)
+    nodes = q.prompt_segments[0]
+    math_nodes = [n for n in nodes if isinstance(n, MathRef)]
+    assert [(n.latex, n.display_mode) for n in math_nodes] == [
+        ("x^2", False),
+        ("y^2", False),
+        ("a+b", True),
+        ("c+d", True),
+    ]
+    # The escaped dollar sign is literal text, not a fifth MathRef.
+    assert "$5" in plain_text(nodes)
+
+
+def test_math_inside_bold_does_not_carry_bold_flag():
+    html = """
+    <div class="question-block">
+      <div class="card-header"><h1>Math in bold</h1></div>
+      <div class="card-body question-body">
+        <p><strong>Solve $x^2$ now</strong></p>
+        <span class="input-group pl-integer-input">
+          <input class="form-control pl-integer-input-input" name="answer" type="text">
+        </span>
+      </div>
+    </div>
+    """
+    q = parse_instance_question_html(html)
+    nodes = q.prompt_segments[0]
+    text_runs = [n for n in nodes if hasattr(n, "bold") and not isinstance(n, MathRef)]
+    assert text_runs and all(t.bold for t in text_runs)
+    math_nodes = [n for n in nodes if isinstance(n, MathRef)]
+    assert len(math_nodes) == 1
+    assert math_nodes[0].latex == "x^2"
 
 
 def test_option_and_label_rich_content_preserved():

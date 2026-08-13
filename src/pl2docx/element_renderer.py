@@ -46,6 +46,7 @@ behavior (same as before this follow-up) when no `list_formats` is given.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -73,6 +74,9 @@ from pl2docx.html_parser import (
     format_points_text,
     option_letter,
 )
+from pl2docx.latex_math import LatexRenderError, render_math_png
+
+logger = logging.getLogger(__name__)
 
 ANSWER_SPACE_BLANK_LINES = 2
 
@@ -478,10 +482,29 @@ def _render_nodes_into_subdoc(
     list-numbered) paragraph instead of starting a real new one, so a whole
     multi-line `<li>` renders as one real Word list item, not just its first
     line.
+
+    A display-mode `MathRef` (`$$...$$`/`\\[...\\]`) is separated from
+    surrounding content by a soft line break (`Run.add_break()`) rather than
+    a real new paragraph, on both sides - deliberately the *same* mechanism
+    already used for line breaks inside a list item (see `in_list_item`
+    above), rather than a second, paragraph-based mechanism reserved for
+    display math specifically. The user chose this over isolating display
+    math into its own (centerable) paragraph specifically because real
+    course content has display math *inside* `<ol>`/`<ul>` list items -
+    one soft-break rule that behaves identically whether or not it's
+    currently inside a list item means that case needs no separate handling
+    when it's implemented, rather than resurfacing this same design question
+    a second time. Trade-off accepted: display math can't be centered this
+    way (`w:jc`/alignment is paragraph-level in OOXML, so centering only one
+    line sharing a paragraph with left-aligned prose isn't achievable
+    without tab-stop tricks) - skipped, not attempted, per that same
+    decision. No break is added before/after when this is already the
+    first/last thing in its segment.
     """
     for node in nodes:
         if isinstance(node, ListItemStart):
             _start_list_item_paragraph(state, sink, node, list_num_ids)
+            state["needs_break_before_next"] = False
             continue
         if isinstance(node, ListItemEnd):
             state["in_list_item"] = False
@@ -491,7 +514,16 @@ def _render_nodes_into_subdoc(
                 state["paragraph"].add_run().add_break()
             else:
                 state["paragraph"] = sink.add_paragraph()
+            state["needs_break_before_next"] = False
             continue
+        if isinstance(node, MathRef) and node.display_mode:
+            if state["paragraph"].runs:
+                state["paragraph"].add_run().add_break()
+            _render_one_node(state["paragraph"], node, image_base_dir)
+            state["needs_break_before_next"] = True
+            continue
+        if state.pop("needs_break_before_next", False):
+            state["paragraph"].add_run().add_break()
         _render_one_node(state["paragraph"], node, image_base_dir)
 
 
@@ -559,14 +591,66 @@ def _render_one_node(paragraph, node: ContentNode, image_base_dir: Path | None =
     if isinstance(node, ImageRef):
         return _render_image(paragraph, node, image_base_dir)
     if isinstance(node, MathRef):
-        # Real OMML conversion lands in Phase 4 increment 3; interim
-        # fallback keeps output sane in the meantime.
-        delim = "$$" if node.display_mode else "$"
-        return _append_run_text(paragraph, f"{delim}{node.latex}{delim}")
+        return _render_math(paragraph, node)
     return None
 
 
-def _render_image(paragraph, node: ImageRef, image_base_dir: Path | None) -> Run | None:
+def _render_math(paragraph, node: MathRef) -> Run | None:
+    """Render `node` as a real LaTeX-compiled image, falling back to raw-text math.
+
+    Falls back (rather than raising) whenever `latex`/`dvipng` aren't
+    available or the LaTeX source fails to compile - see
+    `pl2docx.latex_math`'s module docstring for why a real LaTeX install is
+    used instead of a pure-Python converter, and why this can fail on a
+    machine without one. A bad/unsupported equation should degrade one
+    question's math, not fail the whole document's render.
+    """
+    try:
+        rendered = render_math_png(node.latex, node.display_mode)
+    except LatexRenderError as exc:
+        logger.warning("Falling back to plain-text math for %r: %s", node.latex, exc)
+        delim = "$$" if node.display_mode else "$"
+        return _append_run_text(paragraph, f"{delim}{node.latex}{delim}")
+    image_ref = ImageRef(local_path=rendered.png_path.name, alt=node.latex)
+    run = _render_image(
+        paragraph,
+        image_ref,
+        image_base_dir=rendered.png_path.parent,
+        default_width=Inches(rendered.width_in),
+    )
+    if run is not None:
+        _set_run_baseline_offset(run, rendered.depth_pt)
+    return run
+
+
+def _set_run_baseline_offset(run: Run, depth_pt: float) -> None:
+    """Lower `run` by `depth_pt` points via OOXML's run-level `<w:position>`.
+
+    Word anchors an inline picture's *bottom* edge to the surrounding text's
+    baseline, treating the whole image as if it had no descender - correct
+    only when the image itself has none. A rendered-math PNG's bottom edge
+    is the bottom of whatever descends furthest below the LaTeX baseline
+    (a fraction's denominator, a subscript), so without this offset such
+    content visibly floats too high (confirmed by the user against
+    fraction/subscript-heavy real course content). `w:position`'s value is
+    in half-points, negative to lower (ECMA-376 17.3.2.36) - `depth_pt=0.0`
+    (no descender) is a no-op, left unset rather than writing a redundant
+    zero.
+    """
+    if depth_pt <= 0:
+        return
+    half_points = round(depth_pt * 2)
+    if half_points == 0:
+        return
+    r_pr = run._element.get_or_add_rPr()
+    position = OxmlElement("w:position")
+    position.set(qn("w:val"), str(-half_points))
+    r_pr.append(position)
+
+
+def _render_image(
+    paragraph, node: ImageRef, image_base_dir: Path | None, default_width=_DEFAULT_IMAGE_WIDTH
+) -> Run | None:
     """Embed `node` as a real inline picture, falling back to alt text.
 
     Falls back (rather than raising) whenever the picture can't actually be
@@ -574,6 +658,17 @@ def _render_image(paragraph, node: ImageRef, image_base_dir: Path | None) -> Run
     external image `fetch.py` deliberately didn't download), or python-docx
     itself rejects the file (e.g. corrupt/unsupported format) - a missing or
     bad image shouldn't fail the whole document's render.
+
+    Parameters
+    ----------
+    default_width : docx.shared.Length
+        Width to use when `node.width_px` isn't set - `_DEFAULT_IMAGE_WIDTH`
+        for fetched question images, or a real computed width for rendered
+        math PNGs (`_render_math` passes `RenderedMath.width_in` explicitly -
+        deliberately *not* left to `add_picture`'s own DPI-metadata
+        auto-sizing, confirmed unreliable for `dvipng` output: it writes a
+        fixed ~96 DPI `pHYs` chunk regardless of the DPI actually used to
+        rasterize, which silently inflated every embedded equation ~6x).
     """
     if image_base_dir is not None and node.local_path:
         image_path = image_base_dir / node.local_path
@@ -581,7 +676,7 @@ def _render_image(paragraph, node: ImageRef, image_base_dir: Path | None) -> Run
             if paragraph.runs and not paragraph.runs[-1].text.endswith(" "):
                 paragraph.add_run(" ")
             run = paragraph.add_run()
-            width = Inches(node.width_px / _CSS_PX_PER_INCH) if node.width_px else _DEFAULT_IMAGE_WIDTH
+            width = Inches(node.width_px / _CSS_PX_PER_INCH) if node.width_px else default_width
             try:
                 run.add_picture(str(image_path), width=width)
                 return run

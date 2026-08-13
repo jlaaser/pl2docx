@@ -1,12 +1,15 @@
 import re
+import shutil
 from pathlib import Path
 
+import pytest
 from docx.shared import Inches
 from docxtpl import DocxTemplate
 
 from pl2docx.element_config import ElementConfig, FillInPreferences, SelectorPreferences
 from pl2docx.element_renderer import build_question_context, create_list_formats
-from pl2docx.html_parser import ImageRef, ParsedQuestion, Widget, plain
+from pl2docx.html_parser import ImageRef, MathRef, ParsedQuestion, Widget, plain
+from pl2docx.latex_math import LatexRenderError
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "instance_question"
 
@@ -389,6 +392,142 @@ def test_image_falls_back_to_alt_text_when_file_missing(starter_template):
 
     assert _inline_shape_count(ctx["question_contents"]) == 0
     assert "missing image" in _text(ctx["question_contents"])
+
+
+def _math_question(latex="x^2", display_mode=False):
+    widget = Widget(kind="integer_input", name="answer")
+    return ParsedQuestion(
+        title="Q",
+        prompt_segments=[
+            [MathRef(latex=latex, display_mode=display_mode)],
+            plain(""),
+        ],
+        widgets=[widget],
+        answer_panel_text=None,
+        points="1",
+        points_numeric=1.0,
+        qid="q/6",
+    )
+
+
+@pytest.mark.skipif(
+    shutil.which("latex") is None or shutil.which("dvipng") is None,
+    reason="requires a LaTeX install (latex) and dvipng on PATH",
+)
+def test_math_ref_embeds_as_real_picture(starter_template):
+    """Phase 4 increment 3: a MathRef must become a real embedded (LaTeX-
+    rendered) picture, not the placeholder "$latex$" text, when a LaTeX
+    install is available."""
+    tpl = _tpl(starter_template)
+    question = _math_question("x^2 + y^2 = z^2")
+    element_config = ElementConfig(preferences={}, behavior_class={})
+    ctx = build_question_context(tpl, question, 1, element_config)
+
+    assert _inline_shape_count(ctx["question_contents"]) == 1
+    assert "$x^2 + y^2 = z^2$" not in _text(ctx["question_contents"])
+
+
+def test_math_ref_falls_back_to_placeholder_text_on_render_error(starter_template, monkeypatch):
+    """A LaTeX compile failure (or no LaTeX install at all) must degrade to
+    the old raw-text placeholder, not crash the whole document render."""
+    import pl2docx.element_renderer as element_renderer_module
+
+    def _boom(latex, display_mode, **kwargs):
+        raise LatexRenderError("simulated failure")
+
+    monkeypatch.setattr(element_renderer_module, "render_math_png", _boom)
+
+    tpl = _tpl(starter_template)
+    question = _math_question("x^2", display_mode=False)
+    element_config = ElementConfig(preferences={}, behavior_class={})
+    ctx = build_question_context(tpl, question, 1, element_config)
+
+    assert _inline_shape_count(ctx["question_contents"]) == 0
+    assert "$x^2$" in _text(ctx["question_contents"])
+
+
+def _mock_render_math_png(monkeypatch):
+    """Stub out real LaTeX compilation with the existing tiny_dot.png fixture,
+    so display-math paragraph-isolation tests don't need a LaTeX install."""
+    import pl2docx.element_renderer as element_renderer_module
+    from pl2docx.latex_math import RenderedMath
+
+    fake = RenderedMath(png_path=FIXTURES_DIR / "files" / "tiny_dot.png", width_in=0.5, depth_pt=0.0)
+    monkeypatch.setattr(element_renderer_module, "render_math_png", lambda *a, **kw: fake)
+
+
+def _break_count(paragraph) -> int:
+    return sum(r._element.xml.count("<w:br/>") for r in paragraph.runs)
+
+
+def test_display_math_separated_by_soft_breaks(starter_template, monkeypatch):
+    """Display-mode math ($$...$$) must be separated from surrounding text by
+    soft line breaks (Run.add_break()) within the SAME paragraph, not
+    isolated into its own real paragraph - the user chose this specifically
+    so the same mechanism works unchanged for display math inside a list
+    item (real content), rather than needing separate list/non-list logic."""
+    _mock_render_math_png(monkeypatch)
+    tpl = _tpl(starter_template)
+    widget = Widget(kind="integer_input", name="answer")
+    question = ParsedQuestion(
+        title="Q",
+        prompt_segments=[
+            [
+                *plain("Before."),
+                MathRef(latex="a+b", display_mode=True),
+                *plain("After."),
+            ],
+            plain(""),
+        ],
+        widgets=[widget],
+        answer_panel_text=None,
+        points="1",
+        points_numeric=1.0,
+        qid="q/7",
+    )
+    element_config = ElementConfig(preferences={}, behavior_class={})
+    ctx = build_question_context(tpl, question, 1, element_config)
+
+    paragraphs = [p for p in ctx["question_contents"].paragraphs if p.text.strip() or p.runs]
+    math_paragraphs = [
+        p for p in paragraphs if any("<w:drawing>" in r._element.xml for r in p.runs)
+    ]
+    math_paragraph = math_paragraphs[0]
+    # "Before."/math/"After." must all share the same paragraph - not split
+    # across separate ones - even though this question also has its own
+    # (unrelated) widget paragraph elsewhere in question_contents.
+    assert "Before." in math_paragraph.text
+    assert "After." in math_paragraph.text
+    assert _break_count(math_paragraph) == 2  # one before, one after the image
+
+
+def test_display_math_no_break_when_alone(starter_template, monkeypatch):
+    """No soft break at all when display math is already the only (first and
+    last) thing in its segment."""
+    _mock_render_math_png(monkeypatch)
+    tpl = _tpl(starter_template)
+    widget = Widget(kind="integer_input", name="answer")
+    question = ParsedQuestion(
+        title="Q",
+        prompt_segments=[
+            [MathRef(latex="a+b", display_mode=True)],
+            plain(""),
+        ],
+        widgets=[widget],
+        answer_panel_text=None,
+        points="1",
+        points_numeric=1.0,
+        qid="q/8",
+    )
+    element_config = ElementConfig(preferences={}, behavior_class={})
+    ctx = build_question_context(tpl, question, 1, element_config)
+
+    paragraphs = [p for p in ctx["question_contents"].paragraphs if p.text.strip() or p.runs]
+    math_paragraphs = [
+        p for p in paragraphs if any("<w:drawing>" in r._element.xml for r in p.runs)
+    ]
+    assert len(math_paragraphs) == 1
+    assert _break_count(math_paragraphs[0]) == 0
 
 
 def test_list_item_marker_shares_line_with_widget_content(starter_template):

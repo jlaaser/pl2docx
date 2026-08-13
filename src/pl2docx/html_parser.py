@@ -578,6 +578,77 @@ def _parse_width_px(width_attr: str | None) -> int | None:
         return None
 
 
+#: Matches LaTeX math delimiters in priority order: an escaped `\$` (literal
+#: dollar sign, not a delimiter - PL's own markdown preprocessing preserves
+#: these specifically so MathJax can still find real delimiters afterward,
+#: see `escape_math_delim` in PL's `markdown.ts`), then `$$...$$`/`\[...\]`
+#: (display mode), then `\(...\)`/`$...$` (inline). `$$` is listed before the
+#: single-`$` alternative so it is never mistaken for two adjacent empty
+#: `$...$` spans - `re` tries alternatives left-to-right at a given start
+#: position and uses the first that matches, not the longest overall match.
+_MATH_SPLIT_RE = re.compile(
+    r"\\\$"
+    r"|\$\$(?P<disp_dd>.*?)\$\$"
+    r"|\\\[(?P<disp_br>.*?)\\\]"
+    r"|\\\((?P<inl_br>.*?)\\\)"
+    r"|\$(?P<inl_d>[^$]*?)\$",
+    re.DOTALL,
+)
+
+
+def _split_math_delimiters(text: str, bold: bool, italic: bool, underline: bool) -> list[ContentNode]:
+    """Split one text node's raw string into `TextRun`/`MathRef` nodes at LaTeX math delimiters.
+
+    Parameters
+    ----------
+    text : str
+        Raw text content of one HTML text node (a `NavigableString`'s
+        `str()`), not yet whitespace-collapsed - that normalization still
+        happens later, in `_normalize_nodes`.
+    bold, italic, underline : bool
+        Character formatting inherited from this text node's tag ancestry,
+        applied to the `TextRun` pieces only - a `MathRef` carries no
+        character-formatting flags of its own, since its rendered appearance
+        is controlled entirely by its LaTeX source instead.
+
+    Returns
+    -------
+    list[ContentNode]
+        `TextRun`/`MathRef` nodes in source order (plain text on both sides
+        of each math span, possibly empty at either end). A `MathRef`'s
+        `latex` is the delimiter-stripped source, otherwise unmodified - not
+        un-escaped or whitespace-trimmed, since interpreting it is the LaTeX
+        renderer's job, not this function's.
+
+    Notes
+    -----
+    Assumes `text` is well-formed enough for delimiters to actually pair up.
+    An unbalanced/stray `$` (no matching closer anywhere in this text node)
+    is not treated as a delimiter at all and passes through as literal text -
+    `_MATH_SPLIT_RE` simply fails to match it, rather than this function
+    validating balance up front.
+    """
+    nodes: list[ContentNode] = []
+    pos = 0
+    for m in _MATH_SPLIT_RE.finditer(text):
+        if m.start() > pos:
+            nodes.append(TextRun(text[pos : m.start()], bold, italic, underline))
+        if m.group(0) == "\\$":
+            nodes.append(TextRun("$", bold, italic, underline))
+        elif m.group("disp_dd") is not None:
+            nodes.append(MathRef(m.group("disp_dd"), display_mode=True))
+        elif m.group("disp_br") is not None:
+            nodes.append(MathRef(m.group("disp_br"), display_mode=True))
+        elif m.group("inl_br") is not None:
+            nodes.append(MathRef(m.group("inl_br"), display_mode=False))
+        elif m.group("inl_d") is not None:
+            nodes.append(MathRef(m.group("inl_d"), display_mode=False))
+        pos = m.end()
+    if pos < len(text):
+        nodes.append(TextRun(text[pos:], bold, italic, underline))
+    return nodes
+
+
 def _walk_content(
     root: Tag, marker_by_id: dict[int, int] | None = None
 ) -> list[ContentNode | _WidgetMarker]:
@@ -613,8 +684,9 @@ def _walk_into(
     if isinstance(node, Comment):
         return
     if isinstance(node, NavigableString):
-        if str(node):
-            out.append(TextRun(text=str(node), bold=bold, italic=italic, underline=underline))
+        text = str(node)
+        if text:
+            out.extend(_split_math_delimiters(text, bold, italic, underline))
         return
     if not isinstance(node, Tag):
         return
@@ -707,7 +779,12 @@ def _normalize_nodes(nodes: list[ContentNode | _WidgetMarker]) -> list[ContentNo
       space each; genuinely empty (not just whitespace-only) runs are dropped.
       Whitespace-only runs are kept as single-space separators at this stage -
       see the trimming pass below for why.
-    - Consecutive `ParagraphBreak`s collapse to one.
+    - Consecutive `ParagraphBreak`s collapse to one - including when only a
+      whitespace-only text node (collapsed to a single space above) sits
+      between them, e.g. the source-formatting indentation between "</p>"
+      and the next "<p>". Without this, sibling block tags produced *two*
+      paragraph breaks instead of one (confirmed by the user against real
+      multi-paragraph content).
     - Leading/trailing `ParagraphBreak`/whitespace-only-`TextRun` nodes are
       stripped from both ends, and the first/last remaining `TextRun`'s own
       leading/trailing whitespace is stripped - this is what lets
@@ -746,6 +823,32 @@ def _normalize_nodes(nodes: list[ContentNode | _WidgetMarker]) -> list[ContentNo
             cleaned.append(TextRun(text, node.bold, node.italic, node.underline))
         else:
             cleaned.append(node)
+
+    # Drop a single-space TextRun (the collapsed form of a whitespace-only
+    # text node - e.g. the indentation between "</p>" and the next "<p>")
+    # when it sits immediately next to a ParagraphBreak on either side, then
+    # re-collapse any ParagraphBreaks that are now adjacent as a result.
+    # Without this, "<p>A</p>\n  <p>B</p>" produced ParagraphBreak, " ",
+    # ParagraphBreak between "A" and "B" - the lone space run defeated the
+    # consecutive-ParagraphBreak merge above (it isn't itself a
+    # ParagraphBreak), so both breaks survived and rendered as *two*
+    # paragraph breaks (an extra blank paragraph) instead of one - confirmed
+    # by the user against real multi-paragraph answer-key content. A space
+    # touching a paragraph boundary is never meaningful either way: nothing
+    # ever renders on the same visual line across a real paragraph break.
+    de_spaced: list[ContentNode | _WidgetMarker] = []
+    for i, node in enumerate(cleaned):
+        if isinstance(node, TextRun) and node.text == " ":
+            prev_is_break = de_spaced and isinstance(de_spaced[-1], ParagraphBreak)
+            next_is_break = i + 1 < len(cleaned) and isinstance(cleaned[i + 1], ParagraphBreak)
+            if prev_is_break or next_is_break:
+                continue
+        de_spaced.append(node)
+    cleaned = []
+    for node in de_spaced:
+        if isinstance(node, ParagraphBreak) and cleaned and isinstance(cleaned[-1], ParagraphBreak):
+            continue
+        cleaned.append(node)
 
     def _is_boundary_junk(n) -> bool:
         # ListItemStart/ListItemEnd are deliberately excluded - see their
