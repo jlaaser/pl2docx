@@ -487,11 +487,15 @@ def hund_violations(system: OrbitalSystem) -> list[EnergyLevel]:
   fill-in elements following that same convention (e.g. `pl-scinum-input`, course-
   specific). `pl-big-o-input` was checked and explicitly deferred (irregular class
   name breaks the pattern) — see `html_parser.py`'s repo-structure entry above.
-- **Rich HTML → docx conversion and image embedding** (Phase 4, reframed from "Math
-  rendering" — same underlying "walk the HTML and convert it properly" work): paragraphs/
-  bold/italic/underline, currently flattened to plain text by `html_parser.py`'s
-  `get_text()`; inline images, now downloaded and saved locally at fetch time
-  (`fetch.py`'s `files/` folders) but not yet embedded in generated docx; math → OMML.
+- **Rich HTML → docx conversion, image embedding, and math rendering (Phase 4)**:
+  **done** as of 2026-08-12 — paragraphs/bold/italic/underline/lists (increment 1,
+  with real Word list numbering as a same-day follow-up), inline images (increment 2),
+  and math (increment 3, rendered as real-`latex`-compiled images rather than OMML —
+  see `latex_math.py`'s repo-structure entry above and
+  `planning_notes/2026-08-12 phase 4 implementation and design decisions.md` for why
+  the OMML target sketched in the original roadmap doc was revised, plus every other
+  Phase 4 design decision and known limitation). Next: Phase 5 (course-owned static
+  elements — see that same planning note's "Suggested prep for Phase 5" section).
 
 ## Verification checklist (once implemented)
 
@@ -500,7 +504,10 @@ def hund_violations(system: OrbitalSystem) -> list[EnergyLevel]:
   `pl-multiple-choice`, `pl-number-input`, `pl-string-input`, `pl-checkbox`,
   `pl-scinum-input`, `pl-order-blocks`, `pl-dropdown`, `pl-symbolic-input`,
   `pl-integer-input`, `pl-image-capture`, `pl-orbitaldiagram`, `pl-chemformula-input`,
-  `pl-drawing`.
+  `pl-drawing`. **Confirmed 2026-08-12: `pl-image-capture` is not yet supported**
+  (surfaced when `reactions/extended/KNO3-synthesis` was ruled out as a Phase 4 math
+  stress-test question for exactly this reason) — real work still needed here, not
+  just an untested item.
 - Math renders correctly in the resulting Word doc (spot-check against source LaTeX).
 - N regenerations produce N distinct, correctly-paired blank/key docs with no state
   leakage between versions.
