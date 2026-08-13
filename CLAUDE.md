@@ -8,7 +8,8 @@ answer key, merged into an instructor-supplied template.
 
 This tool is deliberately **not** part of any specific course repo. It should have no
 hard dependency on any course's custom packages (e.g. the `chemutils` in the `../../chem 0110/pl-pitt-chem0110` course); course-specific
-element rendering plugs in via an adapter (see "Extensibility" below).
+static/interactive elements are handled by two general, element-agnostic capabilities
+(SVG embedding, canvas capture — see "Extensibility" below), not a per-element adapter.
 
 ## Reference material (read-only, do not modify)
 
@@ -28,6 +29,12 @@ Course reference:
 Design/planning notes:
 - Full design/planning doc for this project: `planning_notes/2026-08-05_printable_assignments_planning.md`) — read this before making architectural
   changes; it captures the reasoning behind the approach below, not just the conclusions.
+- Per-phase session handoff notes (read the most recent one first when resuming work):
+  `planning_notes/2026-08-13 phase 5 implementation and design decisions.md` (SVG
+  embedding, canvas capture, zero-widget questions — replaces the original Phase 5/6
+  adapter-interface plan), `planning_notes/2026-08-12 phase 4 implementation and
+  design decisions.md` (rich HTML/image/math rendering), and earlier notes in the same
+  folder for Phases 1-3.
 
 ## Ground rules
 
@@ -654,14 +661,20 @@ def hund_violations(system: OrbitalSystem) -> list[EnergyLevel]:
   Phase 4 design decision and known limitation).
 - **SVG embedding (Phase 5 subphase 1, replaces the original course-adapter Phase
   5/6 plan)**: **done** as of 2026-08-13 — see "Extensibility" above for why the
-  adapter-interface approach was replaced, and `svg_render.py`'s repo-structure entry
-  for the rendering pipeline itself.
+  adapter-interface approach was replaced, `svg_render.py`'s repo-structure entry for
+  the rendering pipeline itself, and
+  `planning_notes/2026-08-13 phase 5 implementation and design decisions.md` for the
+  full session writeup (all three subphases) including a real sizing bug found and
+  fixed mid-session.
 - **Canvas-based interactive element capture (Phase 5 subphase 2)**: **done** as of
-  2026-08-13 — see `canvas_capture.py`'s repo-structure entry. Verified against a real
-  `pl-orbitaldiagram` question added to the test assessment specifically for this
-  (note: `lewis-structures-extended`, used to verify subphase 1, has `print="true"`
-  set and so only ever emits SVG — it was never a live-canvas test case, a correction
-  from this session's initial planning).
+  2026-08-13 — see `canvas_capture.py`'s repo-structure entry and the same planning
+  note above. Verified against a real `pl-orbitaldiagram` question added to the test
+  assessment specifically for this (note: `lewis-structures-extended`, used to verify
+  subphase 1, has `print="true"` set and so only ever emits SVG — it was never a
+  live-canvas test case, a correction from this session's initial planning). Default
+  toolbar-hide and container-selector guesses were revised mid-session after visual
+  review found toolbar-reserved whitespace and low resolution in real captures — see
+  the planning note's §2 for the full before/after.
 - **Zero-widget questions supported (Phase 5 subphase 3)**: **done** as of
   2026-08-13 — subphases 1/2 flatten SVG/canvas content to plain images, but a
   question whose *only* content is one of those diagrams (no other input widget on
@@ -683,7 +696,13 @@ def hund_violations(system: OrbitalSystem) -> list[EnergyLevel]:
   `pl-drawing`. **Confirmed 2026-08-12: `pl-image-capture` is not yet supported**
   (surfaced when `reactions/extended/KNO3-synthesis` was ruled out as a Phase 4 math
   stress-test question for exactly this reason) — real work still needed here, not
-  just an untested item.
+  just an untested item. **Confirmed 2026-08-13: `pl-orbitaldiagram` now supported**
+  via canvas capture (Phase 5 subphase 2, `canvas_capture.py`) — its fabric.js canvas
+  is screenshotted and embedded as a plain image, not rendered as an editable widget.
+  `pl-drawing` is not yet configured/tested with canvas capture (no test question in
+  the current test assessment) but is expected to work with an explicit
+  `container-selector`/`hide-selectors` override, since it doesn't follow the default
+  tag-name-derived guesses — see `canvas_capture.py`'s module docstring.
 - Math renders correctly in the resulting Word doc (spot-check against source LaTeX).
 - N regenerations produce N distinct, correctly-paired blank/key docs with no state
   leakage between versions.
