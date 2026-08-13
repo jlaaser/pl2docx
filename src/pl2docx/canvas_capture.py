@@ -93,16 +93,12 @@ _HIDE_JS = "els => els.forEach(el => el.style.display = 'none')"
 #: same mapping `pl2docx.svg_render` uses) - controls raster sharpness only, giving
 #: the instructor headroom to enlarge the embedded image in Word without visible
 #: pixelation. Independent of the embed's physical size, which comes from the
-#: captured element's own CSS bounding box (times `_EMBED_SCALE`) - not from this.
+#: captured element's own CSS bounding box, set directly on the generated
+#: `<img width>` attribute - previously not set at all, silently falling back to
+#: `element_renderer._DEFAULT_IMAGE_WIDTH`'s fixed 3in, too small for a diagram
+#: meant to be the main content of its printed question.
 _DEFAULT_DPI = 600
 _CSS_PX_PER_INCH = 96
-
-#: How much larger than the captured element's own natural on-page CSS size to embed
-#: it at by default (set via the generated `<img width>` attribute) - the user found
-#: the natural size (previously not set at all, silently falling back to
-#: `element_renderer._DEFAULT_IMAGE_WIDTH`'s fixed 3in) too small for a diagram meant
-#: to be the main content of its printed question.
-_EMBED_SCALE = 1.25
 
 
 def close_browser() -> None:
@@ -237,7 +233,7 @@ def capture_interactive_elements(
                     )
                     img_tag = soup.new_tag("img", src=f"files/{local_name}", alt=f"{tag} diagram")
                     if box and box["width"] > 0:
-                        img_tag["width"] = str(round(box["width"] * _EMBED_SCALE))
+                        img_tag["width"] = str(round(box["width"]))
                 except Exception as exc:
                     logger.warning(
                         "Failed to capture interactive element %r (instance_question %d): %s",

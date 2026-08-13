@@ -147,11 +147,11 @@ def test_default_container_guess_prefers_canvas_wrap_over_root(start_server, tmp
     assert _png_height(default_png) == _png_height(hidden_root_png)
 
 
-def test_captured_image_gets_upscaled_width_attribute(start_server, tmp_path):
+def test_captured_image_gets_natural_width_attribute(start_server, tmp_path):
     """The replacement <img> must carry a `width` attribute derived from the
-    captured element's own CSS bounding box (times _EMBED_SCALE) - not be left
-    unset (which would silently fall back to element_renderer's fixed 3in
-    default, too small for a diagram meant to be a question's main content)."""
+    captured element's own CSS bounding box - not be left unset (which would
+    silently fall back to element_renderer's fixed 3in default, too small for a
+    diagram meant to be a question's main content)."""
     url = start_server(_FIXTURE_HTML)
     files_dir = tmp_path / "files"
     interactive_tags = {"fake-widget": InteractivePreferences(container_selector=".fake-widget-canvas-wrap")}
@@ -161,9 +161,8 @@ def test_captured_image_gets_upscaled_width_attribute(start_server, tmp_path):
     match = re.search(r'width="(\d+)"', result)
     assert match is not None
     width_px = int(match.group(1))
-    # The canvas itself is 100px wide; the wrapping div is at least that wide,
-    # and _EMBED_SCALE (1.25) must have been applied on top of it.
-    assert width_px >= round(100 * canvas_capture_module._EMBED_SCALE)
+    # The canvas itself is 100px wide; the wrapping div is at least that wide.
+    assert width_px >= 100
 
 
 def test_default_hide_selector_guess_matches_toolbar_suffix(start_server, tmp_path):
