@@ -17,7 +17,9 @@ from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 
+from pl2docx.canvas_capture import capture_interactive_elements, close_browser
 from pl2docx.config import Config, load_config
+from pl2docx.element_config import InteractivePreferences, additional_interactive_tags, load_element_config
 from pl2docx.pl_client import PLClient, ZoneGroup
 
 
@@ -73,12 +75,23 @@ def _is_same_origin(base_url: str, src: str) -> bool:
 
 
 def _write_html(
-    client: PLClient, output_dir: Path, assessment_instance_id: int, subdir: str, pages: dict[int, str]
+    client: PLClient,
+    output_dir: Path,
+    course_instance_id: int,
+    assessment_instance_id: int,
+    subdir: str,
+    pages: dict[int, str],
+    interactive_tags: dict[str, InteractivePreferences],
 ) -> None:
     instance_dir = output_dir / str(assessment_instance_id) / subdir
     instance_dir.mkdir(parents=True, exist_ok=True)
     files_dir = instance_dir / "files"
     for instance_question_id, html in pages.items():
+        if interactive_tags:
+            page_url = client.instance_question_url(course_instance_id, instance_question_id)
+            html = capture_interactive_elements(
+                client, html, page_url, files_dir, instance_question_id, interactive_tags
+            )
         html = _download_images(client, files_dir, instance_question_id, html)
         (instance_dir / f"{instance_question_id}.html").write_text(html, encoding="utf-8")
 
@@ -91,7 +104,9 @@ def _write_structure(output_dir: Path, assessment_instance_id: int, zones: list[
     )
 
 
-def fetch_n_instances(config: Config) -> list[int]:
+def fetch_n_instances(
+    config: Config, interactive_tags: dict[str, InteractivePreferences] | None = None
+) -> list[int]:
     """Generate `config.n_instances` distinct instances and fetch blank + key HTML.
 
     Parameters
@@ -99,6 +114,12 @@ def fetch_n_instances(config: Config) -> list[int]:
     config : Config
         Runtime configuration identifying the target server, course
         instance, and assessment.
+    interactive_tags : dict[str, InteractivePreferences] or None
+        Canvas-based interactive elements to screenshot and flatten to plain
+        images at fetch time (Phase 5 subphase 2) - typically
+        `pl2docx.element_config.additional_interactive_tags`'s return value.
+        `None`/empty means no interactive-element capture is attempted (the
+        pre-subphase-2 default).
 
     Returns
     -------
@@ -131,6 +152,7 @@ def fetch_n_instances(config: Config) -> list[int]:
     rendering work doesn't need a live server or a second fetch.
     """
     client = PLClient(config.base_url)
+    interactive_tags = interactive_tags or {}
 
     course_id = client.resolve_course_id(config.course_short_name)
     course_instance_id = client.resolve_course_instance_id(course_id, config.course_instance_short_name)
@@ -146,11 +168,17 @@ def fetch_n_instances(config: Config) -> list[int]:
         instance_question_ids = [iq_id for zone in zones for iq_id in zone.instance_question_ids]
 
         blank_html = client.fetch_instance_questions(course_instance_id, instance_question_ids)
-        _write_html(client, config.output_dir, assessment_instance_id, "blank", blank_html)
+        _write_html(
+            client, config.output_dir, course_instance_id, assessment_instance_id, "blank",
+            blank_html, interactive_tags,
+        )
 
         client.close_instance(course_instance_id, assessment_instance_id)
         key_html = client.fetch_instance_questions(course_instance_id, instance_question_ids)
-        _write_html(client, config.output_dir, assessment_instance_id, "key", key_html)
+        _write_html(
+            client, config.output_dir, course_instance_id, assessment_instance_id, "key",
+            key_html, interactive_tags,
+        )
 
         instance_ids.append(assessment_instance_id)
 
@@ -160,7 +188,13 @@ def fetch_n_instances(config: Config) -> list[int]:
 def main() -> None:
     config_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("config.yaml")
     config = load_config(config_path)
-    instance_ids = fetch_n_instances(config)
+    element_config = load_element_config(config_path)
+    interactive_tags = additional_interactive_tags(element_config)
+    try:
+        instance_ids = fetch_n_instances(config, interactive_tags)
+    finally:
+        if interactive_tags:
+            close_browser()
     print(f"Done. Wrote {len(instance_ids)} instance(s) to {config.output_dir}/")
 
 

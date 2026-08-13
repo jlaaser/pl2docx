@@ -146,15 +146,27 @@ def test_integer_input_key():
     assert q.points == "1"
 
 
-def test_unsupported_element_raises():
+def test_no_widget_on_page_is_supported():
+    """Phase 5 subphase 3: a page with no recognized input widget at all - e.g. a
+    diagram-only question (SVG-only or a captured-canvas-only interactive element,
+    already flattened to a plain <img> before parsing) - must parse successfully
+    with an empty widgets list, not raise. Only missing .question-block/
+    .question-body containers (a genuinely malformed page) still raise."""
     html = """
     <div class="question-block">
       <div class="card-header"><h1>No supported input</h1></div>
       <div class="card-body question-body"><p>Just text, no widget.</p></div>
     </div>
     """
+    q = parse_instance_question_html(html)
+    assert q.widgets == []
+    assert len(q.prompt_segments) == 1
+    assert "Just text, no widget." in plain_text(q.prompt_segments[0])
+
+
+def test_missing_question_block_still_raises():
     with pytest.raises(UnsupportedElementError):
-        parse_instance_question_html(html)
+        parse_instance_question_html("<html><body>Not a real PL page.</body></html>")
 
 
 def test_compound_question_is_supported():
@@ -295,8 +307,9 @@ def test_symbolic_input_formula_editor_mode_not_detected():
     different tag name) alongside hidden <input>s that actually carry the name -
     confirmed against pl-symbolic-input.mustache. Restricting detection to real
     <input>/<textarea> tags must exclude the <math-field>, so a page with only this
-    markup should fail to detect any widget (UnsupportedElementError), not silently
-    produce an empty/unusable one."""
+    markup must detect zero widgets - not raise (Phase 5 subphase 3 - a page with
+    no recognized widget is now supported), and not silently mis-detect the
+    <math-field> as something it isn't."""
     html = """
     <div class="question-block">
       <div class="card-header"><h1>Formula editor</h1></div>
@@ -309,14 +322,15 @@ def test_symbolic_input_formula_editor_mode_not_detected():
       </div>
     </div>
     """
-    with pytest.raises(UnsupportedElementError):
-        parse_instance_question_html(html)
+    q = parse_instance_question_html(html)
+    assert q.widgets == []
 
 
 def test_additional_fill_in_tag_not_detected_without_opt_in():
     """A fill-in-type element that isn't built-in must not be detected unless its
     tag is explicitly passed in additional_fill_in_tags - confirms the mechanism
-    is genuinely opt-in, not accidentally always-on."""
+    is genuinely opt-in, not accidentally always-on. Parses successfully with zero
+    widgets (Phase 5 subphase 3) rather than raising."""
     html = """
     <div class="question-block">
       <div class="card-header"><h1>Scinum</h1></div>
@@ -327,8 +341,8 @@ def test_additional_fill_in_tag_not_detected_without_opt_in():
       </div>
     </div>
     """
-    with pytest.raises(UnsupportedElementError):
-        parse_instance_question_html(html)
+    q = parse_instance_question_html(html)
+    assert q.widgets == []
 
 
 def test_additional_fill_in_tag_compound_question():

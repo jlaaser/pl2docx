@@ -63,11 +63,71 @@ Current structure:
 │   │                               #   via resolve_course_id/resolve_course_instance_id/
 │   │                               #   resolve_assessment_id); parse_zone_groups() and friends -
 │   │                               #   pure fns parsing zone/question structure and id-resolution
-│   │                               #   source pages, each testable offline against saved HTML
+│   │                               #   source pages, each testable offline against saved HTML.
+│   │                               #   Phase 5 subphase 2: instance_question_url() (public - not
+│   │                               #   `_`-prefixed like this class's other URL builders, since
+│   │                               #   canvas_capture.py needs to navigate a headless browser to
+│   │                               #   the live page itself) and playwright_cookies() (translates
+│   │                               #   this client's authenticated session.cookies into
+│   │                               #   Playwright's BrowserContext.add_cookies() format).
+│   ├── _browser.py                # Phase 5 subphase 2: get_browser()/close_browser() - a shared,
+│   │                               #   lazily-launched headless-Chromium singleton used by BOTH
+│   │                               #   svg_render.py and canvas_capture.py, so the two features
+│   │                               #   share one browser process instead of each launching its
+│   │                               #   own. Leading underscore: internal shared utility, not a
+│   │                               #   public CLI/API surface. BrowserUnavailableError raised when
+│   │                               #   Chromium isn't installed; each caller translates that into
+│   │                               #   its own module's error type/fallback (e.g.
+│   │                               #   svg_render.SvgRenderError).
+│   ├── canvas_capture.py          # Phase 5 subphase 2: capture_interactive_elements() -
+│   │                               #   screenshots canvas-based interactive PL elements (fabric.js
+│   │                               #   widgets a student draws on directly, e.g.
+│   │                               #   pl-orbitaldiagram/pl-lewisstructure's non-print mode) at
+│   │                               #   FETCH time (not render time, unlike svg_render.py) - a
+│   │                               #   canvas's content only exists after real JS execution
+│   │                               #   against the live variant, so this drives a headless browser
+│   │                               #   (via _browser.py) to the real instance_question URL with
+│   │                               #   PLClient's session cookies attached
+│   │                               #   (PLClient.playwright_cookies()), not something replayable
+│   │                               #   from already-saved static HTML. Confirmed real DOM
+│   │                               #   convention (both pl-orbitaldiagram and pl-lewisstructure,
+│   │                               #   NOT core PL's pl-drawing): root container class equals the
+│   │                               #   element's own tag name verbatim - default
+│   │                               #   container_selector guess when not configured. No single
+│   │                               #   toolbar-class-suffix convention holds across all three
+│   │                               #   confirmed elements, so the default hide_selectors guess
+│   │                               #   tries several candidate suffixes
+│   │                               #   (_DEFAULT_HIDE_SUFFIXES) rather than one hardcoded string;
+│   │                               #   a non-matching candidate is a harmless no-op. Every matched
+│   │                               #   container is ALWAYS replaced with an <img> tag before
+│   │                               #   returning - a real one on success, or a placeholder
+│   │                               #   (empty src, alt="[interactive content unavailable]") on
+│   │                               #   any capture failure - deliberately never leaves raw
+│   │                               #   canvas/toolbar markup in the HTML, since html_parser.py's
+│   │                               #   generic-tag walk would otherwise recurse into it and leak
+│   │                               #   stray toolbar-button text into the rendered prompt. The
+│   │                               #   empty-src placeholder needs zero html_parser.py/
+│   │                               #   element_renderer.py changes - _render_image()'s existing
+│   │                               #   fallback already treats a falsy local_path as "use alt
+│   │                               #   text". Same reason no new Widget kind/ContentNode type was
+│   │                               #   needed for this feature at all: by the time
+│   │                               #   html_parser.py ever runs, a captured (or placeholder)
+│   │                               #   canvas is already an ordinary <img>, indistinguishable
+│   │                               #   from any other downloaded image.
 │   ├── fetch.py                   # CLI entry point (python -m pl2docx.fetch / `pl2docx-fetch`) -
 │   │                               #   also downloads same-origin <img>s into files/ next to each
 │   │                               #   instance_question's HTML, rewriting src to the local path,
-│   │                               #   and writes structure.json (zone titles + question order/ids)
+│   │                               #   and writes structure.json (zone titles + question order/ids).
+│   │                               #   Phase 5 subphase 2: when config.yaml declares any
+│   │                               #   additional-elements type: interactive entries, also calls
+│   │                               #   canvas_capture.capture_interactive_elements() per
+│   │                               #   instance_question (before _download_images - order doesn't
+│   │                               #   functionally matter, since captured <img src="files/...">
+│   │                               #   paths are already-local and untouched by
+│   │                               #   _download_images' same-origin filter) for both the blank fetch (interactive
+│   │                               #   question panel, toolbar visible until hidden) and key
+│   │                               #   fetch (answer panel, no toolbar) - reuses the existing
+│   │                               #   two-pass blank/key architecture unchanged.
 │   ├── html_parser.py             # parse_instance_question_html() -> ParsedQuestion; built-in
 │   │                               #   support: pl-multiple-choice, pl-checkbox, and 5 fill-in-type
 │   │                               #   elements sharing one markup pattern (pl-string-input,
@@ -88,14 +148,34 @@ Current structure:
 │   │                               #   questions are supported (Phase 3B), not rejected.
 │   │                               #   ParsedQuestion.prompt_segments is aligned 1:1 around widgets
 │   │                               #   (len(widgets)+1) so callers can interleave rendered widget
-│   │                               #   content at its real source position. UnsupportedElementError
-│   │                               #   now only covers zero recognized widgets found on the page.
+│   │                               #   content at its real source position. Phase 5 subphase 3
+│   │                               #   (2026-08-13): a page with ZERO recognized widgets is no
+│   │                               #   longer an UnsupportedElementError - a diagram-only question
+│   │                               #   (SVG-only, or a captured-canvas-only interactive element -
+│   │                               #   see svg_render.py/canvas_capture.py) is legitimate;
+│   │                               #   ParsedQuestion.widgets is simply []. Needed to render real
+│   │                               #   assessments in full - element_renderer.py's
+│   │                               #   _build_question_contents already had a `if not
+│   │                               #   question.widgets:` fast path from earlier phases, so this was
+│   │                               #   purely relaxing html_parser.py's own guard, no renderer
+│   │                               #   changes needed. UnsupportedElementError now only covers the
+│   │                               #   page's generic containers (.question-block/.question-body)
+│   │                               #   not being found at all - i.e. not looking like a real PL page.
 │   │                               #   Also extracts qid (Staff info panel) and points_numeric.
 │   ├── element_config.py          # Phase 3B: SelectorPreferences/FillInPreferences/ElementConfig
 │   │                               #   dataclasses + load_element_config()/resolve_preferences() -
 │   │                               #   loads config.yaml's global-element-preferences/
 │   │                               #   additional-elements sections; all keys optional, built-in
-│   │                               #   defaults apply when absent
+│   │                               #   defaults apply when absent. Phase 5 subphase 2: a third
+│   │                               #   BehaviorClass, "interactive", with its own
+│   │                               #   InteractivePreferences dataclass (container_selector/
+│   │                               #   hide_selectors) and additional_interactive_tags()
+│   │                               #   accessor - kept in a SEPARATE ElementConfig.
+│   │                               #   interactive_preferences dict, deliberately NOT merged into
+│   │                               #   ElementPreferences/resolve_preferences(), since an
+│   │                               #   interactive-typed tag is consumed by fetch.py/
+│   │                               #   canvas_capture.py at fetch time and never becomes a Widget
+│   │                               #   needing a render-time preference at all.
 │   ├── latex_math.py              # Phase 4 increment 3: render_math_png() - compiles raw LaTeX
 │   │                               #   (MathRef.latex) to a depth-annotated, print-resolution PNG
 │   │                               #   via a real latex + dvipng subprocess pipeline (not pdflatex +
@@ -206,8 +286,15 @@ Current structure:
 │   │                                         #   launch try/except)
 │   ├── test_docx_builder.py                 # unit tests, no live server needed
 │   ├── test_starter_template.py             # unit tests, no live server needed
-│   ├── test_pl_client.py                    # unit tests for parse_zone_groups(), no live server needed
-│   ├── test_fetch.py                        # unit tests for image download/rewrite, no live server needed
+│   ├── test_pl_client.py                    # unit tests for parse_zone_groups()/instance_question_url()/
+│   │                                         #   playwright_cookies(), no live server needed
+│   ├── test_fetch.py                        # unit tests for image download/rewrite + interactive-capture
+│   │                                         #   wiring (monkeypatched capture_interactive_elements, no
+│   │                                         #   Chromium/live server needed), no live server needed
+│   ├── test_canvas_capture.py                # unit tests for canvas_capture.py; skip-gated on Chromium
+│   │                                         #   availability, exercised against a small local static
+│   │                                         #   HTML fixture served over a local HTTP server (not the
+│   │                                         #   real PL dev server) so this stays offline/CI-safe
 │   └── test_pl_client_integration.py        # full flow against the real local server;
 │                                             #   self-skips if config.yaml or the server is absent
 ├── config.example.yaml            # template - copy to config.yaml (gitignored) and fill in
@@ -333,9 +420,11 @@ Update this repository structure description as needed when significant changes 
      (confirmed real case: `pl-lewisstructure`'s `print="true"` mode), or a downloaded
      `.svg` file referenced via `<img src>` (e.g. through `<pl-figure>`) — rasterizes to a
      PNG via a headless browser and embeds like any other image.
-   - **Canvas capture** (deferred): will screenshot a canvas-based widget's container
-     `<div>` directly (e.g. `pl-lewisstructure`'s non-print fabric.js mode, future
-     `pl-orbitaldiagram`), rather than reaching into each element's own JS API.
+   - **Canvas capture** (`canvas_capture.py`, done as of 2026-08-13): screenshots a
+     canvas-based widget's container `<div>` directly at fetch time (e.g.
+     `pl-lewisstructure`'s non-print fabric.js mode, `pl-orbitaldiagram`), rather than
+     reaching into each element's own JS API — see `canvas_capture.py`'s repo-structure
+     entry above.
 5. **HTML → Word** — purpose-built conversion layer (not generic pandoc). **Phase 3
    architecture**: document *layout* (zone/question loop, headers, page structure,
    named Word styles for appearance) lives in the instructor's own docx template,
@@ -404,10 +493,17 @@ general capabilities that need no per-element code:
   `.svg` file referenced via `<img src>`, e.g. through `<pl-figure>`) to a PNG via a
   headless browser, then embeds it like any other image. Detection is based purely on
   `<svg>` tag presence / `.svg` file extension, never on which PL element produced it.
-- **Canvas capture** (deferred, not yet implemented) — will screenshot the container
-  `<div>` of any canvas-based interactive widget (after hiding toolbar elements via a
-  configured CSS selector), producing a PNG the same way, again with no per-element
-  code. See `planning_notes/` for the full write-up once implemented.
+- **Canvas capture** (`canvas_capture.py`, done as of 2026-08-13) — screenshots the
+  container `<div>` of a canvas-based interactive widget at fetch time, after hiding
+  toolbar/controls elements (configured or guessed — see `canvas_capture.py`'s
+  repo-structure entry), replacing it with a plain `<img>` the same way SVG embedding
+  does, again with no per-element code. Configured via `additional-elements`' `type:
+  interactive` (a third `BehaviorClass` alongside `selector`/`fill-in`) — see
+  `config.example.yaml`. Confirmed real detection convention (container class equals
+  the element's own tag name) checked against two course elements
+  (`pl-lewisstructure`, `pl-orbitaldiagram`) but explicitly **not** universal — core
+  PL's `pl-drawing` doesn't follow it, hence the explicit `container-selector`/
+  `hide-selectors` override support.
 
 ## Tooling / environment
 
@@ -421,13 +517,15 @@ general capabilities that need no per-element code:
 - Docx templating: **docxtpl** (fall back to raw `python-docx` only if a merge pattern
   doesn't fit docxtpl's Jinja-style model) + **docxcompose** (docxtpl's subdoc feature
   requires it). See the `{{p content }}` gotcha noted under Repository structure.
-- Headless browser tooling: **Playwright**. First real consumer is SVG rendering
-  (`svg_render.py`) — a canvas-capture feature (deferred, see "Extensibility" above)
-  will reuse the same browser/context lifecycle. Requires a one-time
-  `playwright install chromium` after `uv sync` (the `playwright` pip package itself
-  is a pinned dependency, but the Chromium browser binary is a separate download —
-  `svg_render.py` raises a clear `SvgRenderError` pointing at this command if
-  Chromium isn't installed, rather than failing with an opaque launch error).
+- Headless browser tooling: **Playwright**. Used by both `svg_render.py` (static SVG
+  rasterization, subphase 1) and `canvas_capture.py` (live-page canvas screenshotting,
+  subphase 2), which share one Chromium process via `_browser.py`'s
+  `get_browser()`/`close_browser()` singleton rather than each launching its own.
+  Requires a one-time `playwright install chromium` after `uv sync` (the `playwright`
+  pip package itself is a pinned dependency, but the Chromium browser binary is a
+  separate download — `svg_render.py`/`canvas_capture.py` raise a clear error pointing
+  at this command if Chromium isn't installed, rather than failing with an opaque
+  launch error).
 - Math rendering (`latex_math.py`): requires a local **TeX distribution** with
   `latex`, `dvipng`, and `kpsewhich` on `PATH` (MiKTeX confirmed installed and
   working on this machine). Built-in packages (`amsmath`/`amssymb`/`xcolor`) need no
@@ -557,9 +655,23 @@ def hund_violations(system: OrbitalSystem) -> list[EnergyLevel]:
 - **SVG embedding (Phase 5 subphase 1, replaces the original course-adapter Phase
   5/6 plan)**: **done** as of 2026-08-13 — see "Extensibility" above for why the
   adapter-interface approach was replaced, and `svg_render.py`'s repo-structure entry
-  for the rendering pipeline itself. Canvas-based interactive element capture
-  (subphase 2) is deferred to a later session once a canvas-based test question
-  exists in the test assessment.
+  for the rendering pipeline itself.
+- **Canvas-based interactive element capture (Phase 5 subphase 2)**: **done** as of
+  2026-08-13 — see `canvas_capture.py`'s repo-structure entry. Verified against a real
+  `pl-orbitaldiagram` question added to the test assessment specifically for this
+  (note: `lewis-structures-extended`, used to verify subphase 1, has `print="true"`
+  set and so only ever emits SVG — it was never a live-canvas test case, a correction
+  from this session's initial planning).
+- **Zero-widget questions supported (Phase 5 subphase 3)**: **done** as of
+  2026-08-13 — subphases 1/2 flatten SVG/canvas content to plain images, but a
+  question whose *only* content is one of those diagrams (no other input widget on
+  the page at all, e.g. `lewis-structures-extended`/the new `pl-orbitaldiagram`
+  question) still hit `html_parser.py`'s "zero recognized widgets" guard, blocking
+  `pl2docx-render` for the whole assessment. `element_renderer.py` already handled
+  `widgets == []` from an earlier phase, so this was purely relaxing that one guard
+  — see `html_parser.py`'s repo-structure entry. Verified: the full
+  `pl2docx-phase1-test` assessment (all 4 zones, including both diagram-only
+  questions) now renders end-to-end with no regressions to previously-working zones.
 
 ## Verification checklist (once implemented)
 

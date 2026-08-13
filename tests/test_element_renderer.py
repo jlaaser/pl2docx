@@ -988,6 +988,31 @@ def test_block_fill_in_gets_leading_break_when_reusing_content(starter_template)
     assert "Answer:" in lines[1]
 
 
+def test_question_with_no_widgets_renders_successfully(starter_template):
+    """Phase 5 subphase 3: a question with zero widgets (e.g. a diagram-only page,
+    now supported by html_parser.py) must still produce a real, non-empty
+    question_contents subdoc, an empty-but-present answer_element, and must not
+    error - matching _build_question_contents' own `if not question.widgets:`
+    fast path."""
+    tpl = _tpl(starter_template)
+    question = ParsedQuestion(
+        title="Diagram-only question",
+        prompt_segments=[[*plain("Here is a diagram:"), ImageRef(local_path="", alt="a diagram")]],
+        widgets=[],
+        answer_panel_text=None,
+        points="1",
+        points_numeric=1.0,
+        qid="q/10",
+    )
+    element_config = ElementConfig(preferences={}, behavior_class={})
+    ctx = build_question_context(tpl, question, 1, element_config)
+
+    assert "Here is a diagram" in _text(ctx["question_contents"])
+    assert "a diagram" in _text(ctx["question_contents"])  # ImageRef alt-text fallback
+    assert ctx["answer_element"] is not None
+    assert _text(ctx["answer_element"]) == ""
+
+
 def _svg_question(svg_markup='<svg viewBox="0 0 10 10"><rect width="10" height="10"/></svg>'):
     widget = Widget(kind="integer_input", name="answer")
     return ParsedQuestion(

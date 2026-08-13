@@ -68,6 +68,26 @@ template_path: "template.docx"
 #     type: fill-in              # selector | fill-in - which built-in behavior set to extend
 #     display: null
 #     draw-border: false
+#
+# type: interactive is a third option (Phase 5 subphase 2), for canvas-based widgets a
+# student draws on directly (fabric.js elements like pl-orbitaldiagram/
+# pl-lewisstructure). Unlike selector/fill-in, this doesn't configure how a widget
+# renders in the docx template - it's captured (screenshotted via a headless browser)
+# and flattened to a plain image entirely at fetch time (pl2docx-fetch), so by the time
+# pl2docx-render runs it's already an ordinary embedded picture, same as any other image.
+#   pl-orbitaldiagram:
+#     type: interactive
+#     # container-selector omitted -> defaults to ".pl-orbitaldiagram" (a div whose
+#     # class matches the tag name verbatim - confirmed real convention for this
+#     # element and pl-lewisstructure, but NOT universal: core PL's pl-drawing wraps
+#     # itself in ".pl-drawing-container" instead, so an element that doesn't follow
+#     # this convention needs an explicit override here, e.g.:
+#     # container-selector: ".pl-drawing-container"
+#     # hide-selectors omitted -> tries a handful of guessed toolbar/controls
+#     # selectors derived from the tag name (covers every confirmed real element's
+#     # naming, including pl-drawing's ".pl-drawing-sidebar") before falling back to
+#     # capturing whatever toolbar is visible. Set explicitly for anything else, e.g.:
+#     # hide-selectors: [".pl-drawing-sidebar"]
 
 # Extra LaTeX packages to load in every rendered math snippet's preamble, beyond
 # pl2docx's small built-in default set (amsmath, amssymb, xcolor - packages virtually

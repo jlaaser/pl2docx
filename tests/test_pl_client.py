@@ -1,4 +1,5 @@
 from pl2docx.pl_client import (
+    PLClient,
     ZoneGroup,
     extract_assessment_tid,
     parse_assessment_ids,
@@ -136,3 +137,29 @@ def test_extract_assessment_tid_found():
 
 def test_extract_assessment_tid_not_found():
     assert extract_assessment_tid("<html><body>no json here</body></html>") is None
+
+
+def test_instance_question_url_format():
+    client = PLClient("http://localhost:3000")
+    url = client.instance_question_url(course_instance_id=1, instance_question_id=1367)
+    assert url == "http://localhost:3000/pl/course_instance/1/instance_question/1367/"
+
+
+def test_playwright_cookies_empty_session():
+    client = PLClient("http://localhost:3000")
+    assert client.playwright_cookies() == []
+
+
+def test_playwright_cookies_translates_session_cookie_jar():
+    client = PLClient("http://localhost:3000")
+    client.session.cookies.set("pl_authn", "abc123", domain="localhost", path="/")
+    cookies = client.playwright_cookies()
+    assert len(cookies) == 1
+    cookie = cookies[0]
+    assert cookie["name"] == "pl_authn"
+    assert cookie["value"] == "abc123"
+    assert cookie["domain"] == "localhost"
+    assert cookie["path"] == "/"
+    assert cookie["secure"] is False
+    assert cookie["httpOnly"] is True
+    assert cookie["expires"] == -1  # no expiry set -> session-cookie sentinel

@@ -326,14 +326,20 @@ _BUILTIN_FILL_IN_TAGS: dict[str, str] = {
 
 
 class UnsupportedElementError(RuntimeError):
-    """Raised when a question's element type/shape isn't one this module handles.
+    """Raised when a question page's generic containers can't be found at all.
 
     Compound questions (more than one distinct input-widget group on a page) are
-    supported as of Phase 3B — this now only covers questions where none of the
-    supported element types' input markup could be recognized at all (built-in, or
-    declared via `additional-elements` and passed in as `additional_fill_in_tags`),
-    or the page's generic containers (`.question-block`/`.question-body`) couldn't
-    be found.
+    supported as of Phase 3B. **A question with zero recognized input widgets is
+    no longer an error** (Phase 5 subphase 3, 2026-08-13) — a page whose only
+    content is a diagram/image/math (e.g. a `print="true"` SVG element, or a
+    captured-and-flattened interactive canvas element - see
+    `pl2docx.svg_render`/`pl2docx.canvas_capture`) is entirely legitimate;
+    `ParsedQuestion.widgets` is simply empty and `prompt_segments` holds the page's
+    whole content as one segment (see `_extract_prompt_segments`).
+    `pl2docx.element_renderer.build_question_context` already handles
+    `widgets == []` explicitly. This now only covers pages whose generic
+    containers (`.question-block`/`.question-body`) couldn't be found at all -
+    i.e. the fetched HTML doesn't look like a real PL instance_question page.
     """
 
 
@@ -496,9 +502,11 @@ def parse_instance_question_html(
     Raises
     ------
     UnsupportedElementError
-        If the question's generic containers can't be found, or if none of
-        the supported element types' input markup is recognized anywhere on
-        the page.
+        If the question's generic containers (`.question-block`/
+        `.question-body`) can't be found. A page with zero recognized input
+        widgets is *not* an error (Phase 5 subphase 3) - `ParsedQuestion.widgets`
+        is simply empty, e.g. for a question whose only content is a diagram
+        (an SVG-only or captured-canvas-only element).
     """
     soup = BeautifulSoup(html, "html.parser")
 
@@ -520,14 +528,6 @@ def parse_instance_question_html(
     qid = _extract_qid(soup)
 
     groups = _find_widget_groups(question_body, additional_fill_in_tags)
-    if not groups:
-        raise UnsupportedElementError(
-            "No supported input widget (pl-multiple-choice/pl-checkbox/"
-            + "/".join(_BUILTIN_FILL_IN_TAGS.values())
-            + (f"/{'/'.join(additional_fill_in_tags)}" if additional_fill_in_tags else "")
-            + ") found in page HTML."
-        )
-
     widgets = [_build_widget(group, answer_body) for group in groups]
     prompt_segments = _extract_prompt_segments(question_body, groups, additional_fill_in_tags)
 

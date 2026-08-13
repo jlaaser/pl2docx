@@ -19,7 +19,7 @@ rewrite, but that override capability isn't built now.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -27,7 +27,7 @@ import yaml
 
 Display = Literal["inline", "block", "template", "none"]
 ListStyle = Literal["letter-labels", "bubble", "checkbox"]
-BehaviorClass = Literal["selector", "fill-in"]
+BehaviorClass = Literal["selector", "fill-in", "interactive"]
 
 # Internal `pl2docx.html_parser.QuestionKind` values, keyed by the PL element tag name
 # used in config.yaml.
@@ -109,6 +109,40 @@ ElementPreferences = SelectorPreferences | FillInPreferences
 
 
 @dataclass(frozen=True)
+class InteractivePreferences:
+    """Fetch-time capture settings for a canvas-based interactive widget (Phase 5 subphase 2).
+
+    Unlike `SelectorPreferences`/`FillInPreferences`, this never reaches
+    `resolve_preferences()` or `pl2docx.element_renderer` — an `additional-elements`
+    tag declaring `type: interactive` is captured (screenshotted) and flattened to a
+    plain `<img>` entirely at fetch time (`pl2docx.canvas_capture`), before
+    `pl2docx.html_parser` ever runs, so it never becomes a `Widget` needing a
+    rendering-time preference at all. See `pl2docx.canvas_capture`'s module docstring.
+
+    Parameters
+    ----------
+    container_selector : str or None
+        CSS selector (relative to the fetched page) identifying the DOM subtree to
+        screenshot and replace with the captured image. `None` means "not yet
+        resolved" — `additional_interactive_tags()` defaults it to `f".{tag}"` (class
+        matching the element's own tag name verbatim — confirmed real convention for
+        `pl-lewisstructure`/`pl-orbitaldiagram`, though **not** universal: core PL's
+        `pl-drawing` uses `.pl-drawing-container` instead, so an element that doesn't
+        follow this convention needs an explicit override here).
+    hide_selectors : list[str] or None
+        CSS selectors (relative to the page) to hide before screenshotting (e.g. a
+        toolbar/controls div) — an explicit, possibly empty, list here fully replaces
+        `pl2docx.canvas_capture`'s own default candidate-selector guesses; `None`
+        means "no explicit config, fall back to those guesses". See
+        `pl2docx.canvas_capture._DEFAULT_HIDE_SUFFIXES`'s docstring for why a single
+        derived default string doesn't reliably cover every real element.
+    """
+
+    container_selector: str | None = None
+    hide_selectors: list[str] | None = None
+
+
+@dataclass(frozen=True)
 class ElementConfig:
     """Resolved element/question-level formatting preferences for one pl2docx run.
 
@@ -119,15 +153,23 @@ class ElementConfig:
         `"multiple_choice"`), already merged from `global-element-preferences` and
         `additional-elements`. Not necessarily covering every kind
         `pl2docx.html_parser` can produce — `resolve_preferences` falls back to
-        built-in defaults for any kind missing here.
+        built-in defaults for any kind missing here. Never includes `interactive`-typed
+        tags (see `interactive_preferences`).
     behavior_class : dict[str, BehaviorClass]
-        Which preference dataclass applies to each non-built-in kind declared via
-        `additional-elements`. Built-in kinds don't need an entry (see
-        `_BUILTIN_BEHAVIOR_CLASS`).
+        Which behavior class applies to each non-built-in tag declared via
+        `additional-elements` (`"selector"`, `"fill-in"`, or `"interactive"`). Built-in
+        kinds don't need an entry (see `_BUILTIN_BEHAVIOR_CLASS`).
+    interactive_preferences : dict[str, InteractivePreferences]
+        `additional-elements` entries declaring `type: interactive`, keyed by PL tag
+        name — consumed by `pl2docx.fetch`/`pl2docx.canvas_capture` at fetch time, not
+        by `resolve_preferences`/`pl2docx.element_renderer` (see
+        `InteractivePreferences`'s docstring for why this is a separate dict, not
+        merged into `preferences`).
     """
 
     preferences: dict[str, ElementPreferences]
     behavior_class: dict[str, BehaviorClass]
+    interactive_preferences: dict[str, InteractivePreferences] = field(default_factory=dict)
 
 
 def load_element_config(path: str | Path) -> ElementConfig:
@@ -150,30 +192,35 @@ def load_element_config(path: str | Path) -> ElementConfig:
     ------
     ValueError
         If an `additional-elements` entry is missing its required `type` key, or
-        declares a `type` other than `"selector"`/`"fill-in"`.
+        declares a `type` other than `"selector"`/`"fill-in"`/`"interactive"`.
     """
     path = Path(path)
     if not path.exists():
-        return ElementConfig(preferences={}, behavior_class={})
+        return ElementConfig(preferences={}, behavior_class={}, interactive_preferences={})
 
     with path.open("r", encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
 
     behavior_class: dict[str, BehaviorClass] = {}
+    interactive_preferences: dict[str, InteractivePreferences] = {}
     additional = raw.get("additional-elements") or {}
     for tag, entry in additional.items():
         entry = entry or {}
         kind_type = entry.get("type")
-        if kind_type not in ("selector", "fill-in"):
+        if kind_type not in ("selector", "fill-in", "interactive"):
             raise ValueError(
-                f"additional-elements entry '{tag}' must declare type: selector|fill-in "
-                f"(got {kind_type!r})."
+                f"additional-elements entry '{tag}' must declare type: "
+                f"selector|fill-in|interactive (got {kind_type!r})."
             )
         behavior_class[tag] = kind_type
+        if kind_type == "interactive":
+            interactive_preferences[tag] = _build_interactive_preferences(entry)
 
     preferences: dict[str, ElementPreferences] = {}
     global_prefs = raw.get("global-element-preferences") or {}
     for tag, entry in {**global_prefs, **additional}.items():
+        if behavior_class.get(tag) == "interactive":
+            continue  # handled above - never becomes a rendering-time Widget preference
         entry = {k: v for k, v in (entry or {}).items() if k != "type"}
         kind = _BUILTIN_KIND_BY_TAG.get(tag, tag)
         cls = _BUILTIN_BEHAVIOR_CLASS.get(kind) or behavior_class.get(tag)
@@ -184,7 +231,11 @@ def load_element_config(path: str | Path) -> ElementConfig:
             )
         preferences[kind] = _build_preferences(cls, entry)
 
-    return ElementConfig(preferences=preferences, behavior_class=behavior_class)
+    return ElementConfig(
+        preferences=preferences,
+        behavior_class=behavior_class,
+        interactive_preferences=interactive_preferences,
+    )
 
 
 def _build_preferences(behavior_class: BehaviorClass, entry: dict) -> ElementPreferences:
@@ -192,6 +243,11 @@ def _build_preferences(behavior_class: BehaviorClass, entry: dict) -> ElementPre
     if behavior_class == "selector":
         return SelectorPreferences(**entry)
     return FillInPreferences(**entry)
+
+
+def _build_interactive_preferences(entry: dict) -> InteractivePreferences:
+    entry = {k.replace("-", "_"): v for k, v in entry.items() if k != "type"}
+    return InteractivePreferences(**entry)
 
 
 def resolve_preferences(element_config: ElementConfig, kind: str) -> ElementPreferences:
@@ -216,7 +272,11 @@ def resolve_preferences(element_config: ElementConfig, kind: str) -> ElementPref
     ------
     KeyError
         If `kind` isn't a built-in kind and has no matching preferences/behavior-class
-        entry in `element_config` — i.e. an unconfigured, non-built-in element type.
+        entry in `element_config` (an unconfigured, non-built-in element type), or if
+        `kind` is configured as `type: interactive` — an interactive-typed tag is a
+        fetch-time-only concern (see `InteractivePreferences`'s docstring) and never
+        becomes a `Widget` needing a rendering-time preference, so calling this for one
+        is always a caller bug, not a normal "use defaults" case.
     """
     if kind in element_config.preferences:
         prefs = element_config.preferences[kind]
@@ -234,6 +294,12 @@ def resolve_preferences(element_config: ElementConfig, kind: str) -> ElementPref
     if behavior_class is None:
         raise KeyError(
             f"No built-in or configured behavior class for widget kind '{kind}'."
+        )
+    if behavior_class == "interactive":
+        raise KeyError(
+            f"'{kind}' is configured as type: interactive - it's captured and flattened "
+            "to a plain image at fetch time and never becomes a Widget needing a "
+            "rendering-time preference."
         )
     if behavior_class == "selector":
         return SelectorPreferences(list_style=_DEFAULT_LIST_STYLE_BY_KIND.get(kind, "bubble"))
@@ -260,3 +326,29 @@ def additional_fill_in_tags(element_config: ElementConfig) -> list[str]:
         do generically, without any course-specific knowledge in `pl2docx` itself.
     """
     return [tag for tag, cls in element_config.behavior_class.items() if cls == "fill-in"]
+
+
+def additional_interactive_tags(element_config: ElementConfig) -> dict[str, InteractivePreferences]:
+    """Resolve `additional-elements` tags declared as `type: interactive`.
+
+    Parameters
+    ----------
+    element_config : ElementConfig
+        The run's loaded element configuration.
+
+    Returns
+    -------
+    dict[str, InteractivePreferences]
+        Tag name -> preferences, with `container_selector` defaulted to `f".{tag}"`
+        when not explicitly configured (`None`). `hide_selectors` is passed through
+        as-is (`None` left for the caller, `pl2docx.canvas_capture`, to interpret as
+        "fall back to its own default candidate guesses" - see that module). Meant to
+        be passed straight through to `pl2docx.canvas_capture.capture_interactive_elements`.
+    """
+    return {
+        tag: InteractivePreferences(
+            container_selector=prefs.container_selector or f".{tag}",
+            hide_selectors=prefs.hide_selectors,
+        )
+        for tag, prefs in element_config.interactive_preferences.items()
+    }

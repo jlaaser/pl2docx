@@ -45,7 +45,9 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from playwright.sync_api import Browser, BrowserContext, Error as PlaywrightError, sync_playwright
+from playwright.sync_api import BrowserContext, Error as PlaywrightError
+
+from pl2docx._browser import BrowserUnavailableError, close_browser as _close_shared_browser, get_browser
 
 _DEFAULT_DPI = 600
 _RENDER_TIMEOUT_MS = 20_000
@@ -109,8 +111,6 @@ class RenderedSvg:
 _cache: dict[tuple[str, int], RenderedSvg] = {}
 _cache_dir: Path | None = None
 
-_playwright_ctx = None
-_browser: Browser | None = None
 _contexts: dict[int, BrowserContext] = {}
 
 
@@ -121,22 +121,6 @@ def _get_cache_dir() -> Path:
     return _cache_dir
 
 
-def _get_browser() -> Browser:
-    global _playwright_ctx, _browser
-    if _browser is None:
-        try:
-            _playwright_ctx = sync_playwright().start()
-            _browser = _playwright_ctx.chromium.launch()
-        except Exception as exc:
-            _playwright_ctx = None
-            _browser = None
-            raise SvgRenderError(
-                "Playwright's Chromium browser is not available - after installing "
-                "pl2docx's dependencies, run `playwright install chromium` once."
-            ) from exc
-    return _browser
-
-
 def _get_context(dpi: int) -> BrowserContext:
     """Return (creating if needed) the browser context for `dpi`'s device-scale-factor.
 
@@ -144,11 +128,16 @@ def _get_context(dpi: int) -> BrowserContext:
     `device_scale_factor` (screenshot px per CSS px) - mapped here as
     `dpi / 96`, so `dpi=600` (matching `latex_math.py`'s default) yields a
     ~6.25x scale factor. Contexts are cached per `dpi` value since that's the
-    only thing that varies call to call in this module.
+    only thing that varies call to call in this module. Uses the shared
+    `pl2docx._browser` Chromium process (see that module's docstring).
     """
     context = _contexts.get(dpi)
     if context is None:
-        context = _get_browser().new_context(
+        try:
+            browser = get_browser()
+        except BrowserUnavailableError as exc:
+            raise SvgRenderError(str(exc)) from exc
+        context = browser.new_context(
             device_scale_factor=dpi / _CSS_PX_PER_INCH, viewport=_FALLBACK_VIEWPORT
         )
         _contexts[dpi] = context
@@ -156,24 +145,21 @@ def _get_context(dpi: int) -> BrowserContext:
 
 
 def close_browser() -> None:
-    """Explicitly tear down the shared browser/Playwright process, if one was started.
+    """Explicitly tear down this module's contexts and the shared browser/Playwright process.
 
     pl2docx's CLI entry points (`fetch.py`/`render.py`) are one-shot process
     invocations, so calling this is optional - Python process teardown would
     eventually reap the underlying subprocess anyway - but it avoids a
     dangling-driver warning / slower exit. Safe to call when no browser was
-    ever launched (no-op).
+    ever launched (no-op). Safe to call alongside
+    `pl2docx.canvas_capture.close_browser()` (both ultimately close the same
+    shared browser - `pl2docx._browser.close_browser()` is itself idempotent).
     """
-    global _playwright_ctx, _browser, _contexts
+    global _contexts
     for context in _contexts.values():
         context.close()
     _contexts = {}
-    if _browser is not None:
-        _browser.close()
-        _browser = None
-    if _playwright_ctx is not None:
-        _playwright_ctx.stop()
-        _playwright_ctx = None
+    _close_shared_browser()
 
 
 def render_svg_png(svg_markup: str, *, dpi: int = _DEFAULT_DPI) -> RenderedSvg:

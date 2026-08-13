@@ -1,4 +1,6 @@
-from pl2docx.fetch import _download_images, _is_same_origin
+import pl2docx.fetch as fetch_module
+from pl2docx.element_config import InteractivePreferences
+from pl2docx.fetch import _download_images, _is_same_origin, _write_html
 
 
 class _StubClient:
@@ -9,6 +11,9 @@ class _StubClient:
     def fetch_binary(self, url: str) -> bytes:
         self.requested_urls.append(url)
         return b"fake-image-bytes"
+
+    def instance_question_url(self, course_instance_id: int, instance_question_id: int) -> str:
+        return f"{self.base_url}/pl/course_instance/{course_instance_id}/instance_question/{instance_question_id}/"
 
 
 def test_is_same_origin():
@@ -59,3 +64,53 @@ def test_download_images_no_images_returns_html_unchanged(tmp_path):
     result_html = _download_images(client, tmp_path / "files", instance_question_id=1, html=html)
 
     assert result_html == html
+
+
+def test_write_html_calls_capture_interactive_elements_when_configured(tmp_path, monkeypatch):
+    """Phase 5 subphase 2: `_write_html` must call `capture_interactive_elements`
+    (before `_download_images`) with the live page URL, when `interactive_tags` is
+    non-empty - verified via monkeypatching, no Chromium/live server needed."""
+    calls = []
+
+    def fake_capture(client, html, page_url, files_dir, instance_question_id, interactive_tags):
+        calls.append((page_url, instance_question_id, list(interactive_tags)))
+        return html.replace("<canvas></canvas>", '<img src="files/captured.png" alt="diagram">')
+
+    monkeypatch.setattr(fetch_module, "capture_interactive_elements", fake_capture)
+
+    client = _StubClient("http://localhost:3000")
+    interactive_tags = {"pl-orbitaldiagram": InteractivePreferences(container_selector=".pl-orbitaldiagram")}
+    pages = {42: '<div class="pl-orbitaldiagram"><canvas></canvas></div>'}
+
+    _write_html(
+        client, tmp_path, course_instance_id=1, assessment_instance_id=99, subdir="blank",
+        pages=pages, interactive_tags=interactive_tags,
+    )
+
+    assert len(calls) == 1
+    page_url, instance_question_id, tags = calls[0]
+    assert page_url == "http://localhost:3000/pl/course_instance/1/instance_question/42/"
+    assert instance_question_id == 42
+    assert tags == ["pl-orbitaldiagram"]
+
+    written = (tmp_path / "99" / "blank" / "42.html").read_text(encoding="utf-8")
+    assert "captured.png" in written
+    assert "<canvas>" not in written
+
+
+def test_write_html_skips_capture_when_no_interactive_tags_configured(tmp_path, monkeypatch):
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("capture_interactive_elements should not be called")
+
+    monkeypatch.setattr(fetch_module, "capture_interactive_elements", fail_if_called)
+
+    client = _StubClient("http://localhost:3000")
+    pages = {1: "<p>No canvas here.</p>"}
+
+    _write_html(
+        client, tmp_path, course_instance_id=1, assessment_instance_id=1, subdir="blank",
+        pages=pages, interactive_tags={},
+    )
+
+    written = (tmp_path / "1" / "blank" / "1.html").read_text(encoding="utf-8")
+    assert "No canvas here." in written

@@ -371,11 +371,54 @@ class PLClient:
             f"/assessment_instance/{assessment_instance_id}"
         )
 
-    def _instance_question_url(self, course_instance_id: int, instance_question_id: int) -> str:
+    def instance_question_url(self, course_instance_id: int, instance_question_id: int) -> str:
+        """Return the live page URL for one `instance_question` (the page this client fetches).
+
+        Public (not `_`-prefixed, unlike this class's other URL builders) so
+        callers needing to navigate to the *live* page themselves - not just
+        fetch its HTML/binary content via this client's own methods - can
+        reuse the exact URL format, e.g. `pl2docx.canvas_capture`
+        (Phase 5 subphase 2) driving a headless browser to screenshot a
+        canvas-based interactive widget.
+        """
         return (
             f"{self.base_url}/pl/course_instance/{course_instance_id}"
             f"/instance_question/{instance_question_id}/"
         )
+
+    def playwright_cookies(self) -> list[dict]:
+        """Translate this client's authenticated session cookies into Playwright's cookie format.
+
+        Returns
+        -------
+        list[dict]
+            One dict per cookie in `self.session.cookies` (a `RequestsCookieJar`),
+            each shaped for `playwright.sync_api.BrowserContext.add_cookies()`:
+            `{"name", "value", "domain", "path", "secure", "expires"}`. `expires`
+            is `-1` (Playwright's "session cookie" sentinel) when the source
+            cookie has none set. `httpOnly` isn't tracked by `http.cookiejar`
+            (what `requests` builds on), so it's always set `True` here - safe
+            for this client's purposes, since every cookie it holds is PL's own
+            auth-session cookie, never one this code needs to read/write via JS.
+
+        Notes
+        -----
+        Meant to be called once a request has actually been made (e.g. after
+        `fetch_instance_questions`) so the session has real cookies to
+        translate - calling this before any request just returns `[]`.
+        """
+        return [
+            {
+                "name": cookie.name,
+                "value": cookie.value,
+                "domain": cookie.domain,
+                "path": cookie.path,
+                "secure": bool(cookie.secure),
+                "httpOnly": True,
+                "expires": cookie.expires if cookie.expires else -1,
+            }
+            for cookie in self.session.cookies
+        ]
 
     def _course_admin_instances_url(self, course_id: int) -> str:
         return f"{self.base_url}/pl/course/{course_id}/course_admin/instances"
@@ -606,7 +649,7 @@ class PLClient:
         """
         result: dict[int, str] = {}
         for iq_id in instance_question_ids:
-            url = self._instance_question_url(course_instance_id, iq_id)
+            url = self.instance_question_url(course_instance_id, iq_id)
             result[iq_id] = self._get(url).text
         return result
 
