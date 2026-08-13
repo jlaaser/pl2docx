@@ -206,6 +206,30 @@ class MathRef:
     display_mode: bool = False
 
 
+@dataclass(frozen=True)
+class SvgRef:
+    """An inline `<svg>...</svg>` block, not yet rasterized to a picture.
+
+    Parameters
+    ----------
+    svg_markup : str
+        The `<svg ...>...</svg>` tag's own outer HTML, verbatim, as captured
+        from the source page — handed to `pl2docx.svg_render.render_svg_png`
+        unmodified at render time.
+    alt : str
+        Fallback display text if rasterization fails or Chromium isn't
+        available. This module has no way to derive meaningful alt text from
+        arbitrary SVG shape markup (unlike `<img alt>`), so this is a fixed
+        generic string unless the source `<svg>` carries an `aria-label`
+        (confirmed present on real course-element output, e.g.
+        `pl-lewisstructure`'s print-mode SVG) — used when available, since
+        real SVGs reaching this module are already accessibility-annotated.
+    """
+
+    svg_markup: str
+    alt: str = "[diagram]"
+
+
 #: One node in a flattened, order-preserving walk of an HTML fragment's content.
 #: Produced by `_walk_content`/consumed by `pl2docx.element_renderer` to render
 #: formatted runs, paragraph breaks, images, and math into a docx Subdoc instead
@@ -213,7 +237,7 @@ class MathRef:
 #: by the walker starting Phase 4 increment 1, but only rendered as their real
 #: picture/OMML form once increments 2/3 land (element_renderer falls back to
 #: alt text / raw LaTeX text until then).
-ContentNode = TextRun | ParagraphBreak | ListItemStart | ListItemEnd | ImageRef | MathRef
+ContentNode = TextRun | ParagraphBreak | ListItemStart | ListItemEnd | ImageRef | MathRef | SvgRef
 
 
 def plain(text: str) -> list[ContentNode]:
@@ -264,6 +288,8 @@ def plain_text(nodes: list[ContentNode]) -> str:
             parts.append(node.alt)
         elif isinstance(node, MathRef):
             parts.append(node.latex)
+        elif isinstance(node, SvgRef):
+            parts.append(node.alt)
         else:
             parts.append(" ")
     # No separator inserted here - each TextRun already carries its own real
@@ -707,6 +733,18 @@ def _walk_into(
                 width_px=_parse_width_px(node.get("width")),
             )
         )
+        return
+    if name == "svg":
+        # Captured whole (str(node) serializes this Tag's own outer HTML,
+        # descendants included) and not descended into - an inline <svg>'s
+        # shape markup (<path>/<circle>/<text>/...) has no ContentNode
+        # equivalent, so descending into it as a generic tag would either
+        # contribute nothing (shape elements) or silently leak stray
+        # <text> content through as loose TextRuns. See
+        # pl2docx.svg_render's module docstring for why this needs a real
+        # headless browser to size/rasterize correctly, rather than being
+        # handled here.
+        out.append(SvgRef(svg_markup=str(node), alt=node.get("aria-label") or "[diagram]"))
         return
     if name == "br":
         out.append(ParagraphBreak())

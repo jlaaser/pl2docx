@@ -132,6 +132,28 @@ Current structure:
 │   │                               #   cleared whenever configure_extra_packages() is called, since
 │   │                               #   a cached PNG may have been rendered under a different package
 │   │                               #   configuration.
+│   ├── svg_render.py              # Phase 5 subphase 1: render_svg_png() - rasterizes any SVG
+│   │                               #   (raw inline <svg>, or a downloaded .svg file e.g. from
+│   │                               #   <pl-figure>) to a print-resolution PNG via a real headless
+│   │                               #   Chromium browser (Playwright), not a pure-Python SVG library -
+│   │                               #   chosen for full CSS/SVG fidelity and because a later,
+│   │                               #   deferred feature (canvas-based interactive element capture)
+│   │                               #   will need the same headless-browser technology. Sizing is
+│   │                               #   measured from the browser's own rendered bounding box
+│   │                               #   (Playwright locator.bounding_box()), not hand-parsed from the
+│   │                               #   SVG's width/height/viewBox attributes - not every SVG an
+│   │                               #   instructor might embed reliably sets those, so this defers to
+│   │                               #   the browser's own complete SVG-sizing algorithm (including its
+│   │                               #   300x150 spec default) instead of re-implementing it. Requires
+│   │                               #   Chromium installed via `playwright install chromium` (a
+│   │                               #   one-time step separate from the `playwright` pip package
+│   │                               #   itself); raises SvgRenderError (caught by
+│   │                               #   element_renderer.py's per-item fallback to alt text) when
+│   │                               #   unavailable, mirroring latex_math.py's LatexRenderError.
+│   │                               #   Results cached per-process (module-level dict + temp dir),
+│   │                               #   keyed by (sha256(svg_markup), dpi); browser/context lifecycle
+│   │                               #   is a lazy module-level singleton, reused across every SVG
+│   │                               #   render in the process (close_browser() for explicit teardown).
 │   ├── element_renderer.py        # build_question_context() - one ParsedQuestion + ElementConfig ->
 │   │                               #   the 4 Subdocs (question_contents/answer_contents/answer_space/
 │   │                               #   answer_element) + qid/points a question's Jinja context needs.
@@ -145,6 +167,10 @@ Current structure:
 │   │                               #   picture (reusing the same _render_image() path ImageRef uses,
 │   │                               #   with default_width=None so python-docx auto-sizes from the
 │   │                               #   PNG's own DPI metadata instead of a fixed fallback width).
+│   │                               #   Phase 5 subphase 1: SvgRef nodes (raw inline <svg>) and
+│   │                               #   .svg-suffixed ImageRef nodes (a downloaded .svg file) both
+│   │                               #   render via svg_render.render_svg_png(), same _render_image()
+│   │                               #   reuse pattern as MathRef.
 │   ├── docx_builder.py            # render_document() - assembles the zones/questions context and
 │   │                               #   calls docxtpl render/save; does NO per-element formatting
 │   │                               #   itself (see element_renderer.py) - document *layout* lives in
@@ -169,7 +195,15 @@ Current structure:
 │   ├── test_csrf.py                         # unit tests, no live server needed
 │   ├── test_html_parser.py                  # unit tests, no live server needed
 │   ├── test_element_config.py               # unit tests, no live server needed
-│   ├── test_element_renderer.py             # unit tests, no live server needed
+│   ├── test_element_renderer.py             # unit tests, no live server needed; SVG-embedding cases
+│   │                                         #   split Chromium-independent (fallback-on-error paths,
+│   │                                         #   monkeypatched) from Chromium-dependent (real
+│   │                                         #   end-to-end picture embedding), same split as the
+│   │                                         #   existing LaTeX-math tests
+│   ├── test_svg_render.py                   # unit tests for svg_render.py; skip-gated on Chromium
+│   │                                         #   availability (mirrors test_latex_math.py's
+│   │                                         #   shutil.which-based skip, adapted to a Playwright
+│   │                                         #   launch try/except)
 │   ├── test_docx_builder.py                 # unit tests, no live server needed
 │   ├── test_starter_template.py             # unit tests, no live server needed
 │   ├── test_pl_client.py                    # unit tests for parse_zone_groups(), no live server needed
@@ -178,7 +212,7 @@ Current structure:
 │                                             #   self-skips if config.yaml or the server is absent
 ├── config.example.yaml            # template - copy to config.yaml (gitignored) and fill in
 ├── pyproject.toml                 # uv-managed; Python 3.14, deps: requests/beautifulsoup4/pyyaml/
-│                                   #   docxtpl/docxcompose
+│                                   #   docxtpl/docxcompose/playwright
 └── output/                        # fetched instance HTML + generated docx (gitignored, runtime);
                                     #   per instance: blank/, key/ (each with a files/ subdir of
                                     #   downloaded images), and structure.json (zone/question layout)
@@ -290,11 +324,18 @@ Update this repository structure description as needed when significant changes 
    `list_instance_questions`/`parse_zone_groups` also capture zone titles and question
    order from the assessment-instance overview page (only place zone titles exist),
    persisted per instance as `structure.json` — not yet consumed by rendering (Phase 3).
-4. **Static rendering of interactive elements**:
-   - Course-owned fabric.js elements (e.g. `pl-orbitaldiagram`, future `pl-lewisstructure`):
-     parse embedded `layout_json` straight out of fetched HTML, render locally as SVG.
-   - Core/third-party fabric.js elements (e.g. `pl-drawing`): headless-browser fallback —
-     load question, wait for fabric init, call `canvas.toSVG()` directly.
+4. **Static rendering of interactive elements** — **Correction (2026-08-13):** this item
+   originally called for per-element static renderers (parsing each course element's own
+   `layout_json`, or a `canvas.toSVG()` fallback for core/third-party fabric.js elements).
+   Replaced with two general, element-agnostic capabilities — see "Extensibility" below:
+   - **SVG embedding** (`svg_render.py`, done): any SVG reaching a page — whether an
+     instructor's own raw `<svg>`, a course element's print mode emitting inline SVG
+     (confirmed real case: `pl-lewisstructure`'s `print="true"` mode), or a downloaded
+     `.svg` file referenced via `<img src>` (e.g. through `<pl-figure>`) — rasterizes to a
+     PNG via a headless browser and embeds like any other image.
+   - **Canvas capture** (deferred): will screenshot a canvas-based widget's container
+     `<div>` directly (e.g. `pl-lewisstructure`'s non-print fabric.js mode, future
+     `pl-orbitaldiagram`), rather than reaching into each element's own JS API.
 5. **HTML → Word** — purpose-built conversion layer (not generic pandoc). **Phase 3
    architecture**: document *layout* (zone/question loop, headers, page structure,
    named Word styles for appearance) lives in the instructor's own docx template,
@@ -351,10 +392,22 @@ Update this repository structure description as needed when significant changes 
 
 ## Extensibility
 
-Course-specific static renderers (like pl-orbitaldiagram and pl-lewisstructure in the example course) should be pluggable as
-adapters, not hardcoded into the core tool. **Interface design deferred** — needs to be
-worked out with real `layout_json` examples from the PL source/course repo in hand,
-not guessed at up front.
+**Revised (2026-08-13), replacing the original per-element adapter-interface plan**:
+an adapter interface for course-specific static renderers (e.g. pl-orbitaldiagram,
+pl-lewisstructure) was judged too fragile — element internals (fabric.js layout JSON,
+canvas structure) change as elements are actively developed, so an adapter interface
+would need constant upkeep, and it wouldn't help with SVG/canvas content an
+instructor embeds directly with no PL element involved at all. Replaced with two
+general capabilities that need no per-element code:
+- **SVG embedding** (`svg_render.py`, done) — rasterizes any SVG reaching a page
+  (raw embedded `<svg>`, a course element's print mode injecting inline SVG, or an
+  `.svg` file referenced via `<img src>`, e.g. through `<pl-figure>`) to a PNG via a
+  headless browser, then embeds it like any other image. Detection is based purely on
+  `<svg>` tag presence / `.svg` file extension, never on which PL element produced it.
+- **Canvas capture** (deferred, not yet implemented) — will screenshot the container
+  `<div>` of any canvas-based interactive widget (after hiding toolbar elements via a
+  configured CSS selector), producing a PNG the same way, again with no per-element
+  code. See `planning_notes/` for the full write-up once implemented.
 
 ## Tooling / environment
 
@@ -368,7 +421,13 @@ not guessed at up front.
 - Docx templating: **docxtpl** (fall back to raw `python-docx` only if a merge pattern
   doesn't fit docxtpl's Jinja-style model) + **docxcompose** (docxtpl's subdoc feature
   requires it). See the `{{p content }}` gotcha noted under Repository structure.
-- Headless browser tooling for the `pl-drawing` fallback: **Playwright**.
+- Headless browser tooling: **Playwright**. First real consumer is SVG rendering
+  (`svg_render.py`) — a canvas-capture feature (deferred, see "Extensibility" above)
+  will reuse the same browser/context lifecycle. Requires a one-time
+  `playwright install chromium` after `uv sync` (the `playwright` pip package itself
+  is a pinned dependency, but the Chromium browser binary is a separate download —
+  `svg_render.py` raises a clear `SvgRenderError` pointing at this command if
+  Chromium isn't installed, rather than failing with an opaque launch error).
 - Math rendering (`latex_math.py`): requires a local **TeX distribution** with
   `latex`, `dvipng`, and `kpsewhich` on `PATH` (MiKTeX confirmed installed and
   working on this machine). Built-in packages (`amsmath`/`amssymb`/`xcolor`) need no
@@ -494,8 +553,13 @@ def hund_violations(system: OrbitalSystem) -> list[EnergyLevel]:
   see `latex_math.py`'s repo-structure entry above and
   `planning_notes/2026-08-12 phase 4 implementation and design decisions.md` for why
   the OMML target sketched in the original roadmap doc was revised, plus every other
-  Phase 4 design decision and known limitation). Next: Phase 5 (course-owned static
-  elements — see that same planning note's "Suggested prep for Phase 5" section).
+  Phase 4 design decision and known limitation).
+- **SVG embedding (Phase 5 subphase 1, replaces the original course-adapter Phase
+  5/6 plan)**: **done** as of 2026-08-13 — see "Extensibility" above for why the
+  adapter-interface approach was replaced, and `svg_render.py`'s repo-structure entry
+  for the rendering pipeline itself. Canvas-based interactive element capture
+  (subphase 2) is deferred to a later session once a canvas-based test question
+  exists in the test assessment.
 
 ## Verification checklist (once implemented)
 

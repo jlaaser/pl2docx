@@ -8,8 +8,11 @@ from docxtpl import DocxTemplate
 
 from pl2docx.element_config import ElementConfig, FillInPreferences, SelectorPreferences
 from pl2docx.element_renderer import build_question_context, create_list_formats
-from pl2docx.html_parser import ImageRef, MathRef, ParsedQuestion, Widget, plain
+from pl2docx.html_parser import ImageRef, MathRef, ParsedQuestion, SvgRef, Widget, plain
 from pl2docx.latex_math import LatexRenderError
+from pl2docx.svg_render import SvgRenderError
+
+from conftest import chromium_available
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "instance_question"
 
@@ -983,3 +986,102 @@ def test_block_fill_in_gets_leading_break_when_reusing_content(starter_template)
     lines = numbered[0].text.split("\n")
     assert lines[0].strip() == "Enter a value:"
     assert "Answer:" in lines[1]
+
+
+def _svg_question(svg_markup='<svg viewBox="0 0 10 10"><rect width="10" height="10"/></svg>'):
+    widget = Widget(kind="integer_input", name="answer")
+    return ParsedQuestion(
+        title="Q",
+        prompt_segments=[
+            [SvgRef(svg_markup=svg_markup, alt="a diagram")],
+            plain(""),
+        ],
+        widgets=[widget],
+        answer_panel_text=None,
+        points="1",
+        points_numeric=1.0,
+        qid="q/8",
+    )
+
+
+def test_svg_ref_falls_back_to_placeholder_text_on_render_error(starter_template, monkeypatch):
+    """Chromium unavailable (or a malformed SVG) must degrade to the alt
+    text, not crash the whole document render - same philosophy as
+    _render_math's LatexRenderError fallback."""
+    import pl2docx.element_renderer as element_renderer_module
+
+    def _boom(svg_markup, **kwargs):
+        raise SvgRenderError("simulated failure")
+
+    monkeypatch.setattr(element_renderer_module, "render_svg_png", _boom)
+
+    tpl = _tpl(starter_template)
+    question = _svg_question()
+    element_config = ElementConfig(preferences={}, behavior_class={})
+    ctx = build_question_context(tpl, question, 1, element_config)
+
+    assert _inline_shape_count(ctx["question_contents"]) == 0
+    assert "a diagram" in _text(ctx["question_contents"])
+
+
+def test_svg_image_ref_falls_back_when_file_missing(starter_template):
+    """An <img src=*.svg> pointing at a file that isn't actually on disk must
+    fall back gracefully, matching the existing missing-raster-image case."""
+    tpl = _tpl(starter_template)
+    widget = Widget(kind="integer_input", name="answer")
+    question = ParsedQuestion(
+        title="Q",
+        prompt_segments=[
+            [ImageRef(local_path="files/does_not_exist.svg", alt="missing diagram")],
+            plain(""),
+        ],
+        widgets=[widget],
+        answer_panel_text=None,
+        points="1",
+        points_numeric=1.0,
+        qid="q/9",
+    )
+    element_config = ElementConfig(preferences={}, behavior_class={})
+    ctx = build_question_context(tpl, question, 1, element_config, image_base_dir=FIXTURES_DIR)
+
+    assert _inline_shape_count(ctx["question_contents"]) == 0
+    assert "missing diagram" in _text(ctx["question_contents"])
+
+
+@pytest.mark.skipif(
+    not chromium_available(), reason="requires Playwright's Chromium browser to be installed"
+)
+def test_svg_ref_embeds_as_real_picture(starter_template):
+    """Phase 5 subphase 1: an inline SvgRef must become a real embedded (headless-
+    browser-rasterized) picture, not the alt-text fallback, when Chromium is available."""
+    tpl = _tpl(starter_template)
+    question = _svg_question(
+        '<svg viewBox="0 0 100 60" width="100" height="60" '
+        'xmlns="http://www.w3.org/2000/svg"><line x1="10" y1="10" x2="90" y2="50" '
+        'stroke="black" stroke-width="2"/></svg>'
+    )
+    element_config = ElementConfig(preferences={}, behavior_class={})
+    ctx = build_question_context(tpl, question, 1, element_config)
+
+    assert _inline_shape_count(ctx["question_contents"]) == 1
+    assert "a diagram" not in _text(ctx["question_contents"])
+
+
+@pytest.mark.skipif(
+    not chromium_available(), reason="requires Playwright's Chromium browser to be installed"
+)
+def test_svg_referenced_via_img_src_embeds_as_real_picture(starter_template):
+    """Phase 5 subphase 1: an <img src=*.svg> (e.g. via <pl-figure>, confirmed to
+    always emit a bare <img> regardless of file type) must rasterize and embed the
+    same way a raw inline <svg> block does."""
+    from pl2docx.html_parser import parse_instance_question_html
+
+    html = (FIXTURES_DIR / "svg_img_blank.html").read_text(encoding="utf-8")
+    question = parse_instance_question_html(html)
+
+    tpl = _tpl(starter_template)
+    element_config = ElementConfig(preferences={}, behavior_class={})
+    ctx = build_question_context(tpl, question, 1, element_config, image_base_dir=FIXTURES_DIR)
+
+    assert _inline_shape_count(ctx["question_contents"]) == 1
+    assert "[image]" not in _text(ctx["question_contents"])

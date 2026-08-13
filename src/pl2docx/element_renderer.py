@@ -26,6 +26,14 @@ pixels) when present, else a fixed default width. Falls back to alt text
 referenced file isn't found on disk - a missing image shouldn't fail the
 whole render.
 
+**SVG embedding**: `SvgRef` nodes (raw inline `<svg>` markup) and `.svg`-suffixed
+`ImageRef` nodes (a downloaded `.svg` file, e.g. from `<pl-figure>`) both render as
+real embedded pictures via `pl2docx.svg_render.render_svg_png` (a headless-browser
+rasterization pipeline, since python-docx/docxtpl cannot embed SVG directly) - see
+`_render_svg`/`_render_svg_image_ref` below and `pl2docx.svg_render`'s module
+docstring. Falls back to alt text (same philosophy as `_render_math`/`_render_image`)
+when Chromium isn't available or a given SVG fails to rasterize.
+
 **Phase 4 increment 1 follow-up**: `ListItemStart`/`ListItemEnd` nodes render
 as *real* Word list items (`<w:numPr>` XML, `_apply_list_numbering`) when a
 `list_formats` is supplied - see `build_question_context`'s parameter docs -
@@ -69,12 +77,14 @@ from pl2docx.html_parser import (
     MathRef,
     ParagraphBreak,
     ParsedQuestion,
+    SvgRef,
     TextRun,
     Widget,
     format_points_text,
     option_letter,
 )
 from pl2docx.latex_math import LatexRenderError, render_math_png
+from pl2docx.svg_render import SvgRenderError, render_svg_png
 
 logger = logging.getLogger(__name__)
 
@@ -589,9 +599,13 @@ def _render_one_node(paragraph, node: ContentNode, image_base_dir: Path | None =
     if isinstance(node, ListItemEnd):
         return None
     if isinstance(node, ImageRef):
+        if node.local_path.lower().endswith(".svg") and image_base_dir is not None:
+            return _render_svg_image_ref(paragraph, node, image_base_dir)
         return _render_image(paragraph, node, image_base_dir)
     if isinstance(node, MathRef):
         return _render_math(paragraph, node)
+    if isinstance(node, SvgRef):
+        return _render_svg(paragraph, node)
     return None
 
 
@@ -621,6 +635,59 @@ def _render_math(paragraph, node: MathRef) -> Run | None:
     if run is not None:
         _set_run_baseline_offset(run, rendered.depth_pt)
     return run
+
+
+def _render_svg(paragraph, node: SvgRef) -> Run | None:
+    """Render `node` as a real rasterized (PNG) picture, falling back to alt text.
+
+    Falls back (rather than raising) whenever Chromium isn't available or
+    the SVG markup fails to rasterize - see `pl2docx.svg_render`'s module
+    docstring for why headless-browser rasterization is used instead of a
+    pure-Python SVG renderer. A bad/unsupported diagram should degrade one
+    question's content, not fail the whole document's render.
+    """
+    try:
+        rendered = render_svg_png(node.svg_markup)
+    except SvgRenderError as exc:
+        logger.warning("Falling back to alt text for inline SVG: %s", exc)
+        return _append_run_text(paragraph, node.alt)
+    image_ref = ImageRef(local_path=rendered.png_path.name, alt=node.alt)
+    return _render_image(
+        paragraph,
+        image_ref,
+        image_base_dir=rendered.png_path.parent,
+        default_width=Inches(rendered.width_in),
+    )
+
+
+def _render_svg_image_ref(paragraph, node: ImageRef, image_base_dir: Path) -> Run | None:
+    """Rasterize an `<img src=*.svg>`-referenced local file, then embed as a picture.
+
+    `fetch.py` downloads every same-origin `<img>` (`.svg` included, e.g. an
+    SVG file used with `<pl-figure>`) with no content-type filtering - by
+    render time the referenced file already exists locally as real SVG
+    markup, but `run.add_picture()` (what plain `_render_image` does) can't
+    embed raw SVG directly, hence routing through the same
+    `pl2docx.svg_render` rasterization helper `SvgRef` nodes use.
+    """
+    image_path = image_base_dir / node.local_path
+    if not image_path.is_file():
+        return _append_run_text(paragraph, node.alt or "[image]")
+    try:
+        svg_markup = image_path.read_text(encoding="utf-8")
+    except OSError:
+        return _append_run_text(paragraph, node.alt or "[image]")
+    try:
+        rendered = render_svg_png(svg_markup)
+    except SvgRenderError as exc:
+        logger.warning("Falling back to alt text for %s: %s", node.local_path, exc)
+        return _append_run_text(paragraph, node.alt or "[image]")
+    # Prefer the source <img width> (PL's own intended on-page size) over the
+    # SVG's own intrinsic size when both are available, matching how every
+    # other ImageRef already prioritizes node.width_px over default_width.
+    width = Inches(node.width_px / _CSS_PX_PER_INCH) if node.width_px else Inches(rendered.width_in)
+    png_ref = ImageRef(local_path=rendered.png_path.name, alt=node.alt)
+    return _render_image(paragraph, png_ref, image_base_dir=rendered.png_path.parent, default_width=width)
 
 
 def _set_run_baseline_offset(run: Run, depth_pt: float) -> None:

@@ -5,6 +5,7 @@ import pytest
 from pl2docx.html_parser import (
     ImageRef,
     MathRef,
+    SvgRef,
     UnsupportedElementError,
     format_points_text,
     parse_instance_question_html,
@@ -696,6 +697,58 @@ def test_prompt_image_and_math_recognized():
     assert len(math_nodes) == 1
     assert math_nodes[0].latex == "x^2"
     assert math_nodes[0].display_mode is False
+
+
+def test_inline_svg_recognized_as_svg_ref():
+    """Phase 5 subphase 1: an inline <svg> block (e.g. pl-lewisstructure's
+    print="true" mode) becomes an SvgRef carrying its full outer markup, and
+    the walker does not descend into its shape children (<line>/<circle>) as
+    stray generic-tag content."""
+    q = parse_instance_question_html(_load("svg_inline_blank.html"))
+    nodes = q.prompt_segments[0]
+    svg_nodes = [n for n in nodes if isinstance(n, SvgRef)]
+    assert len(svg_nodes) == 1
+    assert "<svg" in svg_nodes[0].svg_markup
+    assert "<line" in svg_nodes[0].svg_markup
+    assert svg_nodes[0].alt == "Lewis structure diagram"
+    # No stray text from inside the <svg> leaked out as a separate node.
+    text_only = plain_text([n for n in nodes if not isinstance(n, SvgRef)])
+    assert "Draw the Lewis structure shown below:" in text_only
+
+
+def test_inline_svg_without_aria_label_falls_back_to_generic_alt():
+    html = """
+    <div class="question-block">
+      <div class="card-header"><h1>SVG no label</h1></div>
+      <div class="card-body question-body">
+        <p><svg viewBox="0 0 10 10" xmlns="http://www.w3.org/2000/svg"><rect width="10" height="10"/></svg></p>
+        <span class="input-group pl-integer-input">
+          <input class="form-control pl-integer-input-input" name="answer" type="text">
+        </span>
+      </div>
+    </div>
+    """
+    q = parse_instance_question_html(html)
+    svg_nodes = [n for n in q.prompt_segments[0] if isinstance(n, SvgRef)]
+    assert len(svg_nodes) == 1
+    assert svg_nodes[0].alt == "[diagram]"
+
+
+def test_svg_ref_plain_text_uses_alt():
+    node = SvgRef(svg_markup="<svg></svg>", alt="a diagram")
+    assert plain_text([node]) == "a diagram"
+
+
+def test_img_referencing_svg_file_still_produces_plain_image_ref():
+    """<img src=*.svg> (e.g. via <pl-figure>, confirmed to always emit a bare
+    <img> regardless of the referenced file's type) needs no parser change -
+    the .svg-vs-raster distinction is handled entirely by the renderer, where
+    the file actually gets read from disk."""
+    q = parse_instance_question_html(_load("svg_img_blank.html"))
+    images = [n for n in q.prompt_segments[0] if isinstance(n, ImageRef)]
+    assert len(images) == 1
+    assert images[0].local_path == "files/1_0_diagram.svg"
+    assert not any(isinstance(n, SvgRef) for n in q.prompt_segments[0])
 
 
 def test_math_delimiter_variants():
