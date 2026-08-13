@@ -76,14 +76,24 @@ class TextRun:
         except where a single interior space is needed as a separator between
         differently-formatted neighboring runs.
     bold, italic, underline : bool
-        Whether `<strong>`/`<b>`, `<em>`/`<i>`, `<u>` (respectively) wrapped
-        this text anywhere in its ancestry within the source HTML.
+        Whether `<strong>`/`<b>`, `<em>`/`<i>`, `<u>` (respectively), or an
+        equivalent inline `style` declaration (`font-weight: bold`),
+        wrapped this text anywhere in its ancestry within the source HTML.
+    color : str or None
+        6-digit uppercase hex RGB (e.g. `"FF0000"`, no leading `#`) if any
+        ancestor set an inline `style="color: ..."` this text inherits
+        (named CSS color, `#rgb`/`#rrggbb` hex, or `rgb(r, g, b)` - see
+        `_parse_css_color`), else `None` (render in the template/theme's
+        default color). Best-effort, same philosophy as bold/italic/
+        underline detection: an unrecognized color value/keyword is simply
+        ignored rather than raising.
     """
 
     text: str
     bold: bool = False
     italic: bool = False
     underline: bool = False
+    color: str | None = None
 
 
 @dataclass(frozen=True)
@@ -594,6 +604,105 @@ _UNDERLINE_TAGS = {"u"}
 _BLOCK_TAGS = {"p"}
 _SKIP_TAGS = {"script", "style"}
 
+#: Common CSS named colors (hex, no leading "#") - not the full ~150-keyword
+#: CSS spec list, just the set plausible in course-authored `style="color:
+#: ..."` prose (e.g. `templates/sigfigs-note.mustache`'s red/blue
+#: significant-figures note - confirmed real usage motivating this feature).
+#: An unrecognized name (not in this table, and not `#hex`/`rgb(...)`
+#: either) is simply not treated as a color - best-effort, matching this
+#: module's existing bold/italic detection philosophy.
+_CSS_COLOR_NAMES = {
+    "black": "000000", "white": "FFFFFF", "red": "FF0000", "green": "008000",
+    "blue": "0000FF", "yellow": "FFFF00", "orange": "FFA500", "purple": "800080",
+    "gray": "808080", "grey": "808080", "silver": "C0C0C0", "maroon": "800000",
+    "olive": "808000", "lime": "00FF00", "aqua": "00FFFF", "cyan": "00FFFF",
+    "teal": "008080", "navy": "000080", "fuchsia": "FF00FF", "magenta": "FF00FF",
+    "pink": "FFC0CB", "brown": "A52A2A", "gold": "FFD700", "indigo": "4B0082",
+    "violet": "EE82EE", "coral": "FF7F50", "salmon": "FA8072", "khaki": "F0E68C",
+    "crimson": "DC143C", "turquoise": "40E0D0", "tan": "D2B48C", "beige": "F5F5DC",
+    "chocolate": "D2691E", "darkred": "8B0000", "darkblue": "00008B",
+    "darkgreen": "006400", "darkorange": "FF8C00", "lightblue": "ADD8E6",
+    "lightgreen": "90EE90", "lightgray": "D3D3D3", "lightgrey": "D3D3D3",
+    "darkgray": "A9A9A9", "darkgrey": "A9A9A9",
+}
+
+_HEX6_RE = re.compile(r"^#([0-9a-f]{6})$")
+_HEX3_RE = re.compile(r"^#([0-9a-f])([0-9a-f])([0-9a-f])$")
+_RGB_FN_RE = re.compile(r"^rgb\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)$")
+
+
+def _parse_css_color(value: str) -> str | None:
+    """Resolve one CSS color value to 6-digit uppercase hex (no `#`), or `None`.
+
+    Parameters
+    ----------
+    value : str
+        A CSS `color` property value as it appeared in the source HTML's
+        `style` attribute (e.g. `"red"`, `"#F00"`, `"rgb(255, 0, 0)"`).
+
+    Returns
+    -------
+    str or None
+        `None` if `value` doesn't match any recognized named color, hex, or
+        `rgb()` form - e.g. `rgba()`/`hsl()`/CSS variables, none of which are
+        supported.
+    """
+    value = value.strip().lower()
+    m = _HEX6_RE.match(value)
+    if m:
+        return m.group(1).upper()
+    m = _HEX3_RE.match(value)
+    if m:
+        return "".join(c * 2 for c in m.groups()).upper()
+    m = _RGB_FN_RE.match(value)
+    if m:
+        return "".join(f"{int(c):02X}" for c in m.groups())
+    return _CSS_COLOR_NAMES.get(value)
+
+
+def _parse_style_attr(style: str | None) -> tuple[str | None, bool]:
+    """Extract `color`/bold-equivalent `font-weight` from an inline `style` attribute.
+
+    Parameters
+    ----------
+    style : str or None
+        A tag's raw `style` attribute value, e.g.
+        `"color:red; font-weight:bold;"`.
+
+    Returns
+    -------
+    tuple[str or None, bool]
+        `(color_hex, is_bold)` - `color_hex` per `_parse_css_color` (`None`
+        if absent/unrecognized); `is_bold` is `True` for `font-weight: bold`/
+        `bolder`, or a numeric weight >= 600 (matches CSS's own "semi-bold
+        and up" convention), else `False`.
+    """
+    if not style:
+        return None, False
+    color: str | None = None
+    bold = False
+    for declaration in style.split(";"):
+        if ":" not in declaration:
+            continue
+        prop, _, raw_value = declaration.partition(":")
+        prop = prop.strip().lower()
+        raw_value = raw_value.strip()
+        if not raw_value:
+            continue
+        if prop == "color":
+            parsed = _parse_css_color(raw_value)
+            if parsed is not None:
+                color = parsed
+        elif prop == "font-weight":
+            if raw_value.lower() in ("bold", "bolder"):
+                bold = True
+            else:
+                try:
+                    bold = int(raw_value) >= 600
+                except ValueError:
+                    pass
+    return color, bold
+
 
 def _parse_width_px(width_attr: str | None) -> int | None:
     if not width_attr:
@@ -622,7 +731,9 @@ _MATH_SPLIT_RE = re.compile(
 )
 
 
-def _split_math_delimiters(text: str, bold: bool, italic: bool, underline: bool) -> list[ContentNode]:
+def _split_math_delimiters(
+    text: str, bold: bool, italic: bool, underline: bool, color: str | None = None
+) -> list[ContentNode]:
     """Split one text node's raw string into `TextRun`/`MathRef` nodes at LaTeX math delimiters.
 
     Parameters
@@ -631,11 +742,12 @@ def _split_math_delimiters(text: str, bold: bool, italic: bool, underline: bool)
         Raw text content of one HTML text node (a `NavigableString`'s
         `str()`), not yet whitespace-collapsed - that normalization still
         happens later, in `_normalize_nodes`.
-    bold, italic, underline : bool
+    bold, italic, underline, color
         Character formatting inherited from this text node's tag ancestry,
         applied to the `TextRun` pieces only - a `MathRef` carries no
         character-formatting flags of its own, since its rendered appearance
-        is controlled entirely by its LaTeX source instead.
+        is controlled entirely by its LaTeX source instead (including any
+        `\\textcolor{...}` inside it).
 
     Returns
     -------
@@ -658,9 +770,9 @@ def _split_math_delimiters(text: str, bold: bool, italic: bool, underline: bool)
     pos = 0
     for m in _MATH_SPLIT_RE.finditer(text):
         if m.start() > pos:
-            nodes.append(TextRun(text[pos : m.start()], bold, italic, underline))
+            nodes.append(TextRun(text[pos : m.start()], bold, italic, underline, color))
         if m.group(0) == "\\$":
-            nodes.append(TextRun("$", bold, italic, underline))
+            nodes.append(TextRun("$", bold, italic, underline, color))
         elif m.group("disp_dd") is not None:
             nodes.append(MathRef(m.group("disp_dd"), display_mode=True))
         elif m.group("disp_br") is not None:
@@ -671,7 +783,7 @@ def _split_math_delimiters(text: str, bold: bool, italic: bool, underline: bool)
             nodes.append(MathRef(m.group("inl_d"), display_mode=False))
         pos = m.end()
     if pos < len(text):
-        nodes.append(TextRun(text[pos:], bold, italic, underline))
+        nodes.append(TextRun(text[pos:], bold, italic, underline, color))
     return nodes
 
 
@@ -699,20 +811,20 @@ def _walk_content(
         (and, for prompt splitting, split on `_WidgetMarker`) before use.
     """
     nodes: list[ContentNode | _WidgetMarker] = []
-    _walk_into(root, nodes, marker_by_id or {}, bold=False, italic=False, underline=False)
+    _walk_into(root, nodes, marker_by_id or {}, bold=False, italic=False, underline=False, color=None)
     return nodes
 
 
 def _walk_into(
     node, out: list[ContentNode | _WidgetMarker], marker_by_id: dict[int, int],
-    bold: bool, italic: bool, underline: bool,
+    bold: bool, italic: bool, underline: bool, color: str | None = None,
 ) -> None:
     if isinstance(node, Comment):
         return
     if isinstance(node, NavigableString):
         text = str(node)
         if text:
-            out.extend(_split_math_delimiters(text, bold, italic, underline))
+            out.extend(_split_math_delimiters(text, bold, italic, underline, color))
         return
     if not isinstance(node, Tag):
         return
@@ -750,9 +862,11 @@ def _walk_into(
         out.append(ParagraphBreak())
         return
 
-    child_bold = bold or name in _BOLD_TAGS
+    style_color, style_bold = _parse_style_attr(node.get("style"))
+    child_bold = bold or name in _BOLD_TAGS or style_bold
     child_italic = italic or name in _ITALIC_TAGS
     child_underline = underline or name in _UNDERLINE_TAGS
+    child_color = style_color if style_color is not None else color
 
     if name in ("ol", "ul"):
         # Handled here (not via the generic is_block/_BLOCK_TAGS path below) so
@@ -766,17 +880,19 @@ def _walk_into(
                 index += 1
                 _walk_li(
                     child, out, marker_by_id, child_bold, child_italic, child_underline,
-                    name == "ol", index, list_id,
+                    name == "ol", index, list_id, child_color,
                 )
             else:
-                _walk_into(child, out, marker_by_id, child_bold, child_italic, child_underline)
+                _walk_into(child, out, marker_by_id, child_bold, child_italic, child_underline, child_color)
         return
     if name == "li":
         # A stray <li> outside any <ol>/<ul> (malformed HTML) - no real list
         # to report an ordered flag/position/list_id from, so this always
         # renders as a plain bullet. Real PL content always wraps <li> in
         # ol/ul, which goes through the branch above instead.
-        _walk_li(node, out, marker_by_id, child_bold, child_italic, child_underline, False, None, None)
+        _walk_li(
+            node, out, marker_by_id, child_bold, child_italic, child_underline, False, None, None, child_color
+        )
         return
 
     is_block = name in _BLOCK_TAGS
@@ -784,7 +900,7 @@ def _walk_into(
         out.append(ParagraphBreak())
 
     for child in node.children:
-        _walk_into(child, out, marker_by_id, child_bold, child_italic, child_underline)
+        _walk_into(child, out, marker_by_id, child_bold, child_italic, child_underline, child_color)
 
     if is_block:
         out.append(ParagraphBreak())
@@ -793,7 +909,7 @@ def _walk_into(
 def _walk_li(
     node: Tag, out: list[ContentNode | _WidgetMarker], marker_by_id: dict[int, int],
     bold: bool, italic: bool, underline: bool, ordered: bool, index: int | None,
-    list_id: int | None,
+    list_id: int | None, color: str | None = None,
 ) -> None:
     marker_index = marker_by_id.get(id(node))
     if marker_index is not None:
@@ -803,7 +919,7 @@ def _walk_li(
         out.append(ParagraphBreak())
     out.append(ListItemStart(ordered=ordered, index=index, list_id=list_id))
     for child in node.children:
-        _walk_into(child, out, marker_by_id, bold, italic, underline)
+        _walk_into(child, out, marker_by_id, bold, italic, underline, color)
     out.append(ListItemEnd())
 
 
@@ -838,11 +954,11 @@ def _normalize_nodes(nodes: list[ContentNode | _WidgetMarker]) -> list[ContentNo
             if (
                 merged
                 and isinstance(merged[-1], TextRun)
-                and (merged[-1].bold, merged[-1].italic, merged[-1].underline)
-                == (node.bold, node.italic, node.underline)
+                and (merged[-1].bold, merged[-1].italic, merged[-1].underline, merged[-1].color)
+                == (node.bold, node.italic, node.underline, node.color)
             ):
                 prev = merged[-1]
-                merged[-1] = TextRun(prev.text + node.text, prev.bold, prev.italic, prev.underline)
+                merged[-1] = TextRun(prev.text + node.text, prev.bold, prev.italic, prev.underline, prev.color)
             else:
                 merged.append(node)
         elif isinstance(node, ParagraphBreak):
@@ -858,7 +974,7 @@ def _normalize_nodes(nodes: list[ContentNode | _WidgetMarker]) -> list[ContentNo
             text = re.sub(r"\s+", " ", node.text)
             if text == "":
                 continue
-            cleaned.append(TextRun(text, node.bold, node.italic, node.underline))
+            cleaned.append(TextRun(text, node.bold, node.italic, node.underline, node.color))
         else:
             cleaned.append(node)
 
@@ -904,10 +1020,10 @@ def _normalize_nodes(nodes: list[ContentNode | _WidgetMarker]) -> list[ContentNo
 
     if cleaned and isinstance(cleaned[0], TextRun):
         first = cleaned[0]
-        cleaned[0] = TextRun(first.text.lstrip(), first.bold, first.italic, first.underline)
+        cleaned[0] = TextRun(first.text.lstrip(), first.bold, first.italic, first.underline, first.color)
     if cleaned and isinstance(cleaned[-1], TextRun):
         last = cleaned[-1]
-        cleaned[-1] = TextRun(last.text.rstrip(), last.bold, last.italic, last.underline)
+        cleaned[-1] = TextRun(last.text.rstrip(), last.bold, last.italic, last.underline, last.color)
 
     return cleaned
 

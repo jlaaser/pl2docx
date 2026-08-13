@@ -121,8 +121,49 @@ def test_selector_block_display_one_option_per_line(starter_template):
     )
     ctx = build_question_context(tpl, _mc_question(), 1, element_config)
     paragraphs = [p.text for p in ctx["question_contents"].paragraphs]
-    assert any(p.strip() == "○ Alpha" for p in paragraphs)
-    assert any(p.strip() == "○ Beta" for p in paragraphs)
+    assert any(p.strip() == "◯ Alpha" for p in paragraphs)
+    assert any(p.strip() == "◯ Beta" for p in paragraphs)
+
+
+def test_checkbox_marker_rendered_larger_than_bubble_and_letter_labels(starter_template):
+    """The checkbox marker glyph (▢, U+25A2) renders visually small at normal
+    text size (confirmed by the user) and must carry an explicit, enlarged
+    `font.size`, scaled up from whatever size the paragraph's own style
+    resolves to. `bubble` (◯, U+25EF) already reads large enough at normal
+    size - confirmed by the user an earlier across-the-board bump made it
+    look too big - and `letter-labels` is plain text; both must be left at
+    the paragraph's normal (unset) size."""
+    tpl = _tpl(starter_template)
+    # starter_template's "Normal" style sets no explicit size (None) - same
+    # as many real instructor templates - so the resolver's own 11pt
+    # fallback (Word's stock "Normal" default) is what's actually exercised
+    # here, not a size read back from the template itself.
+    base_pt = 11.0
+
+    element_config = ElementConfig(
+        preferences={"multiple_choice": SelectorPreferences(list_style="checkbox", display="block")},
+        behavior_class={},
+    )
+    ctx = build_question_context(tpl, _mc_question(), 1, element_config)
+    checkbox_run = next(
+        r for p in ctx["question_contents"].paragraphs for r in p.runs if r.text.strip().startswith("▢")
+    )
+    assert checkbox_run.font.size is not None
+    assert checkbox_run.font.size.pt > base_pt
+
+    for list_style, marker_char in (("bubble", "◯"), ("letter-labels", "(A)")):
+        element_config = ElementConfig(
+            preferences={"multiple_choice": SelectorPreferences(list_style=list_style, display="block")},
+            behavior_class={},
+        )
+        ctx = build_question_context(tpl, _mc_question(), 1, element_config)
+        marker_run = next(
+            r
+            for p in ctx["question_contents"].paragraphs
+            for r in p.runs
+            if r.text.strip().startswith(marker_char)
+        )
+        assert marker_run.font.size is None
 
 
 def test_selector_draw_border_inline_uses_run_border(starter_template):
@@ -307,6 +348,40 @@ def test_prompt_bold_run_rendered_with_real_bold_formatting(starter_template):
         r for p in ctx["question_contents"].paragraphs for r in p.runs if "This is" in r.text
     ]
     assert all(not r.bold for r in non_bold_runs)
+
+
+def test_prompt_colored_run_rendered_with_real_font_color(starter_template):
+    """A TextRun.color node (e.g. from an inline `style="color:red"` span, per
+    `templates/sigfigs-note.mustache`'s real significant-figures note) must produce
+    a run with that real RGB font color, not fall back to the template's default."""
+    from docx.shared import RGBColor
+    from pl2docx.html_parser import TextRun
+
+    tpl = _tpl(starter_template)
+    widget = Widget(kind="integer_input", name="answer")
+    question = ParsedQuestion(
+        title="Q",
+        prompt_segments=[
+            [TextRun("Shown in "), TextRun("red", color="FF0000"), TextRun(" here.")],
+            plain(""),
+        ],
+        widgets=[widget],
+        answer_panel_text=None,
+        points="1",
+        points_numeric=1.0,
+        qid="q/5",
+    )
+    element_config = ElementConfig(preferences={}, behavior_class={})
+    ctx = build_question_context(tpl, question, 1, element_config)
+
+    colored_run = next(
+        r for p in ctx["question_contents"].paragraphs for r in p.runs if r.text.strip() == "red"
+    )
+    assert colored_run.font.color.rgb == RGBColor.from_string("FF0000")
+    plain_runs = [
+        r for p in ctx["question_contents"].paragraphs for r in p.runs if "Shown in" in r.text
+    ]
+    assert all(not (r.font.color and r.font.color.type) for r in plain_runs)
 
 
 def _inline_shape_count(subdoc) -> int:
@@ -948,8 +1023,8 @@ def test_block_selector_first_option_gets_leading_break_when_reusing_content(sta
     assert len(numbered) == 1
     lines = numbered[0].text.split("\n")
     assert lines[0].strip() == "Classify this:"
-    assert lines[1].strip() == "○ chemical change"
-    assert lines[2].strip() == "○ physical change"
+    assert lines[1].strip() == "◯ chemical change"
+    assert lines[2].strip() == "◯ physical change"
 
 
 def test_block_fill_in_gets_leading_break_when_reusing_content(starter_template):

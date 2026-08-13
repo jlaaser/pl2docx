@@ -74,8 +74,8 @@ def test_render_document_blank(starter_template, tmp_path):
     assert "1. MC Question (2 points)" in text
     assert "Pick one." in text
     # multiple_choice with no inline signal auto-detects to block display, one option per line
-    assert "○ Alpha" in text
-    assert "○ Beta" in text
+    assert "◯ Alpha" in text
+    assert "◯ Beta" in text
     assert "2. Integer Question (1 point)" in text
     assert "course/questions/mc-question" not in text  # qid only shown in the key
     assert "42" not in text

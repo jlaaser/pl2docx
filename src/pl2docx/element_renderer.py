@@ -60,7 +60,7 @@ from pathlib import Path
 
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Inches
+from docx.shared import Inches, Pt, RGBColor
 from docx.text.run import Run
 from docxtpl import DocxTemplate
 
@@ -276,9 +276,49 @@ def _apply_list_numbering(paragraph, num_id: int, ilvl: int = 0) -> None:
 _SELECTOR_KINDS = ("multiple_choice", "checkbox")
 _LIST_MARKERS = {
     "letter-labels": lambda idx: f"({option_letter(idx)})",
-    "bubble": lambda _idx: "○",  # ○
-    "checkbox": lambda _idx: "☐",  # ☐
+    "bubble": lambda _idx: "◯",  # ◯ LARGE CIRCLE
+    "checkbox": lambda _idx: "▢",  # ▢ WHITE SQUARE WITH ROUNDED CORNERS
 }
+
+#: Marker glyph size, as a multiple of the paragraph's own effective font
+#: size - `letter-labels` is plain text and deliberately excluded (not in
+#: this dict), left at normal size. `bubble` (◯, U+25EF) is also excluded:
+#: at its normal nominal size it already reads plenty large - confirmed by
+#: the user an earlier 1.6x bump made it look too big. Only `checkbox`
+#: (▢, U+25A2) renders visually small at normal text size and needs a
+#: modest boost to read at a comparable size to the bubble glyph.
+_MARKER_SIZE_SCALE = {
+    "checkbox": 1.3,
+}
+
+
+def _resolve_paragraph_font_size_pt(paragraph) -> float:
+    """Best-effort resolution of `paragraph`'s effective font size, in points.
+
+    Walks the paragraph's own style, then its `base_style` chain (python-docx
+    doesn't resolve inherited style properties itself) - this module never
+    sets an explicit run-level font size elsewhere, so a style's own `size`
+    is the only place it could legitimately come from. Falls back to 11.0
+    (Word's own stock "Normal" style default) if no style in the chain
+    defines one at all - an unusual instructor template with no explicit
+    size anywhere, not the common case.
+    """
+    style = paragraph.style
+    while style is not None:
+        if style.font.size is not None:
+            return style.font.size.pt
+        style = style.base_style
+    return 11.0
+
+
+def _apply_marker_font_size(run: Run | None, paragraph, list_style: str) -> None:
+    """Scale up `run` (a bubble/checkbox marker glyph) relative to `paragraph`'s own text size."""
+    if run is None:
+        return
+    scale = _MARKER_SIZE_SCALE.get(list_style)
+    if scale is None:
+        return
+    run.font.size = Pt(_resolve_paragraph_font_size_pt(paragraph) * scale)
 
 
 def build_question_context(
@@ -425,7 +465,18 @@ def _build_question_contents(
                 if is_selector
                 else _render_fill_in_block(target, widget, image_base_dir, first_paragraph)
             )
-            if display == "block":
+            # Only start a fresh paragraph when this widget wasn't reusing an
+            # already-list-numbered paragraph (first_paragraph is None) - when
+            # it was (a block-display widget inside a <li>), the upcoming
+            # ListItemEnd/ParagraphBreak handling in the next prompt_segment
+            # already starts the correct next paragraph; unconditionally
+            # starting one here left a spurious empty paragraph behind between
+            # every list item (confirmed: question_contents only, since
+            # _build_answer_contents never goes through this widget-render
+            # branch at all - it walks answer_panel_text through the generic
+            # node renderer, which is why the extra blank line only appeared
+            # in the question, not the answer key).
+            if display == "block" and first_paragraph is None:
                 state["paragraph"] = subdoc.add_paragraph()
 
         if display != "none" and prefs.draw_border:
@@ -436,7 +487,10 @@ def _build_question_contents(
     return subdoc, answer_element
 
 
-def _append_run_text(paragraph, text: str, bold: bool = False, italic: bool = False, underline: bool = False):
+def _append_run_text(
+    paragraph, text: str, bold: bool = False, italic: bool = False, underline: bool = False,
+    color: str | None = None,
+):
     """Add one run of `text` to `paragraph`, inserting a separating space if needed.
 
     Mirrors Phase 3B's `append_text` prefix behavior (a paragraph that already
@@ -444,6 +498,12 @@ def _append_run_text(paragraph, text: str, bold: bool = False, italic: bool = Fa
     side already supplies the whitespace) — now applied uniformly to every
     run added to a shared paragraph (prompt text, widget-rendered content
     alike), not just prompt-segment text as before.
+
+    Parameters
+    ----------
+    color : str or None
+        6-digit hex RGB (`TextRun.color`'s format, e.g. `"FF0000"`), or
+        `None` to leave the run's color at the template's default.
     """
     if not text:
         return None
@@ -453,6 +513,8 @@ def _append_run_text(paragraph, text: str, bold: bool = False, italic: bool = Fa
     run.bold = bold
     run.italic = italic
     run.underline = underline
+    if color:
+        run.font.color.rgb = RGBColor.from_string(color)
     return run
 
 
@@ -580,7 +642,7 @@ def _list_marker_text(node: ListItemStart) -> str:
 
 def _render_one_node(paragraph, node: ContentNode, image_base_dir: Path | None = None) -> Run | None:
     if isinstance(node, TextRun):
-        return _append_run_text(paragraph, node.text, node.bold, node.italic, node.underline)
+        return _append_run_text(paragraph, node.text, node.bold, node.italic, node.underline, node.color)
     if isinstance(node, ParagraphBreak):
         # Only reached via `_render_nodes_to_paragraph` (inline widget content) -
         # `_render_nodes_into_subdoc` intercepts `ParagraphBreak` itself to start
@@ -771,7 +833,8 @@ def _render_selector_inline(
             runs.extend(paragraph.runs[spacer_start:])
         option_start = len(paragraph.runs)
         marker = _LIST_MARKERS[prefs.list_style](idx)
-        _append_run_text(paragraph, f"{marker} ")
+        marker_run = _append_run_text(paragraph, f"{marker} ")
+        _apply_marker_font_size(marker_run, paragraph, prefs.list_style)
         _render_nodes_to_paragraph(paragraph, option_nodes, image_base_dir)
         combined = list(paragraph.runs[option_start:])
         if prefs.bold_correct and idx in widget.correct_option_indices:
@@ -817,7 +880,8 @@ def _render_selector_block(
             paragraph = sink.add_paragraph()
         marker_start = len(paragraph.runs)
         marker = _LIST_MARKERS[prefs.list_style](idx)
-        _append_run_text(paragraph, f"{marker} ")
+        marker_run = _append_run_text(paragraph, f"{marker} ")
+        _apply_marker_font_size(marker_run, paragraph, prefs.list_style)
         _render_nodes_to_paragraph(paragraph, option_nodes, image_base_dir)
         combined = list(paragraph.runs[marker_start:])
         if prefs.bold_correct and idx in widget.correct_option_indices:

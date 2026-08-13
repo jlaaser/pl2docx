@@ -507,6 +507,38 @@ def test_prompt_bold_italic_underline_preserved():
     assert not any(getattr(n, "bold", False) for n in nodes if n.text.strip() == "This is")
 
 
+def test_prompt_inline_style_color_and_bold_preserved():
+    """Inline `style="color:...; font-weight:bold;"` (e.g.
+    `templates/sigfigs-note.mustache`'s real red/blue significant-figures
+    note) must resolve to TextRun.color/bold, not be silently dropped."""
+    html = """
+    <div class="question-block">
+      <div class="card-header"><h1>Colored note</h1></div>
+      <div class="card-body question-body">
+        <p>Significant digits are shown in
+          <span style="color:red; font-weight:bold;">red</span> and
+          <span style="color:#0000ff">blue</span> (unbolded hex), plain otherwise.
+        </p>
+        <span class="input-group pl-integer-input">
+          <input class="form-control pl-integer-input-input" name="answer" type="text">
+        </span>
+      </div>
+    </div>
+    """
+    q = parse_instance_question_html(html)
+    nodes = q.prompt_segments[0]
+
+    red_nodes = [n for n in nodes if n.text == "red"]
+    assert red_nodes and red_nodes[0].color == "FF0000"
+    assert red_nodes[0].bold is True
+
+    blue_nodes = [n for n in nodes if n.text == "blue"]
+    assert blue_nodes and blue_nodes[0].color == "0000FF"
+    assert blue_nodes[0].bold is False
+
+    assert not any(n.color for n in nodes if n.text.strip() in ("Significant digits are shown in", "plain otherwise."))
+
+
 def test_prompt_paragraphs_and_list_preserved():
     """Multiple <p> blocks and a <ul><li> list should produce ParagraphBreak/
     ListItemStart nodes at the right positions, not silently vanish."""
