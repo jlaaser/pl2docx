@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -44,6 +44,20 @@ class Config:
         Existence isn't checked here — only when actually opened for
         rendering — matching how other paths in this config aren't
         pre-validated at load time.
+    latex_packages : list[str]
+        Extra LaTeX packages (names only, no `.sty` extension, e.g.
+        `["mhchem"]`) to load in every rendered math snippet's preamble, on
+        top of `pl2docx.latex_math`'s small built-in default set
+        (`amsmath`/`amssymb`/`xcolor` — packages virtually every TeX install
+        has). Deliberately *not* auto-detected from equation content (e.g.
+        sniffing for a package-specific macro) — that doesn't generalize to
+        arbitrary packages and still wouldn't guarantee the package is
+        installed; see
+        `pl2docx.latex_math.configure_extra_packages`, which validates these
+        resolve via `kpsewhich` at startup. `[]` (the default) if absent —
+        every math snippet still renders, just without whatever notation the
+        missing package would have provided (e.g. mhchem's `\\ce{}` chemistry
+        formulas fall back to placeholder text without `mhchem` declared here).
 
     Notes
     -----
@@ -59,6 +73,7 @@ class Config:
     n_instances: int
     output_dir: Path
     template_path: Path
+    latex_packages: list[str] = field(default_factory=list)
 
 
 def load_config(path: str | Path) -> Config:
@@ -103,4 +118,5 @@ def load_config(path: str | Path) -> Config:
         n_instances=int(raw.get("n_instances", 1)),
         output_dir=Path(raw.get("output_dir", "output")),
         template_path=Path(raw.get("template_path", "template.docx")),
+        latex_packages=[str(pkg) for pkg in (raw.get("latex-packages") or [])],
     )

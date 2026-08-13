@@ -68,3 +68,15 @@ template_path: "template.docx"
 #     type: fill-in              # selector | fill-in - which built-in behavior set to extend
 #     display: null
 #     draw-border: false
+
+# Extra LaTeX packages to load in every rendered math snippet's preamble, beyond
+# pl2docx's small built-in default set (amsmath, amssymb, xcolor - packages virtually
+# every TeX install has). Declare anything your course's questions need here (package
+# names only, no .sty extension) rather than pl2docx guessing from equation content -
+# guessing doesn't generalize to arbitrary packages and still wouldn't guarantee the
+# package is actually installed. Validated (via kpsewhich) at the start of every
+# pl2docx-render run; a missing package fails fast with a clear error rather than each
+# affected equation silently falling back to placeholder "$latex$" text.
+#
+# latex-packages:
+#   - mhchem

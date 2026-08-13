@@ -20,6 +20,7 @@ from pl2docx.config import load_config
 from pl2docx.docx_builder import ZoneQuestions, render_document
 from pl2docx.element_config import ElementConfig, additional_fill_in_tags, load_element_config
 from pl2docx.html_parser import ParsedQuestion, parse_instance_question_html
+from pl2docx.latex_math import configure_extra_packages
 
 
 def _load_question(
@@ -112,6 +113,9 @@ def main() -> None:
     else:
         template_path = load_config("config.yaml").template_path
     element_config = load_element_config("config.yaml")
+    config_path = Path("config.yaml")
+    if config_path.exists():
+        configure_extra_packages(load_config(config_path).latex_packages)
     blank_path, key_path = render_instance(instance_dir, template_path, element_config)
     print(f"Wrote {blank_path}")
     print(f"Wrote {key_path}")

@@ -10,12 +10,28 @@ import shutil
 
 import pytest
 
-from pl2docx.latex_math import LatexRenderError, render_math_png
+import pl2docx.latex_math as latex_math_module
+from pl2docx.latex_math import (
+    LatexPackageNotFoundError,
+    LatexRenderError,
+    configure_extra_packages,
+    render_math_png,
+)
 
 pytestmark = pytest.mark.skipif(
     shutil.which("latex") is None or shutil.which("dvipng") is None,
     reason="requires a LaTeX install (latex) and dvipng on PATH",
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_extra_packages():
+    """Every test starts from "no extra packages" - configure_extra_packages
+    is process-lifetime module state (see its own docstring), so without
+    this, one test's package configuration would leak into the next."""
+    configure_extra_packages([])
+    yield
+    configure_extra_packages([])
 
 
 def _png_header_size(path) -> tuple[int, int]:
@@ -59,13 +75,46 @@ def test_renders_display_mode_larger_than_inline_for_same_content():
     assert display_h > inline_h
 
 
-def test_renders_mhchem_chemistry_formula():
+def test_mhchem_not_loaded_by_default():
+    """mhchem is no longer a built-in default (config-driven now, see
+    configure_extra_packages) - \\ce{} must fail to compile without it."""
+    with pytest.raises(LatexRenderError):
+        render_math_png("\\ce{H2O}", display_mode=False)
+
+
+def test_renders_mhchem_chemistry_formula_once_configured():
     """This is the whole reason for choosing a real LaTeX install over a
-    pure-Python converter - \\ce{} is a real mhchem macro, not core LaTeX math."""
+    pure-Python converter - \\ce{} is a real mhchem macro, not core LaTeX
+    math, and only available once declared via configure_extra_packages
+    (config.yaml's latex-packages)."""
+    configure_extra_packages(["mhchem"])
     rendered = render_math_png("\\ce{H2O}", display_mode=False)
     assert rendered.png_path.is_file()
     width, height = _png_header_size(rendered.png_path)
     assert width > 0 and height > 0
+
+
+def test_configure_extra_packages_raises_for_missing_package():
+    with pytest.raises(LatexPackageNotFoundError):
+        configure_extra_packages(["this-package-definitely-does-not-exist"])
+
+
+def test_configure_extra_packages_skips_validation_without_kpsewhich(monkeypatch):
+    """No LaTeX install at all is already handled gracefully elsewhere (every
+    render_math_png call falls back to placeholder text) - configuring
+    packages in that situation must not itself raise."""
+    real_which = shutil.which
+    monkeypatch.setattr(
+        latex_math_module.shutil, "which", lambda name: None if name == "kpsewhich" else real_which(name)
+    )
+    configure_extra_packages(["this-package-definitely-does-not-exist"])
+
+
+def test_configure_extra_packages_clears_cache():
+    render_math_png("a+b", display_mode=False)
+    assert latex_math_module._cache
+    configure_extra_packages([])
+    assert not latex_math_module._cache
 
 
 def test_fraction_reports_nonzero_depth():

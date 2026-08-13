@@ -1,13 +1,23 @@
 """Render LaTeX math source to a print-resolution PNG via a real LaTeX install.
 
-Chosen over a pure-Python LaTeX->OMML pipeline specifically because this
-course's content uses the `mhchem` package's `\\ce{...}` macro for chemical
-formulas (confirmed in the course repo's `chemutils/compounds.py` etc.) -
-`mhchem` is a real, fairly elaborate LaTeX package, and general-purpose
-LaTeX->MathML converters don't implement it. Compiling through a real
-`latex` means any LaTeX construct the course ever uses "just works" with no
-subset to maintain, at the cost of non-editable (image, not native
-Word-equation) output. See `planning_notes/` for the full comparison.
+Chosen over a pure-Python LaTeX->OMML pipeline specifically because real
+course content can use specialty LaTeX packages (e.g. `mhchem`'s `\\ce{...}`
+macro for chemical formulas, confirmed in one course's `chemutils/
+compounds.py` etc.) that general-purpose LaTeX->MathML converters don't
+implement. Compiling through a real `latex` means any LaTeX construct a
+course uses "just works" with no subset to maintain, at the cost of
+non-editable (image, not native Word-equation) output. See `planning_notes/`
+for the full comparison.
+
+Only genuinely universal packages (`amsmath`/`amssymb`/`xcolor` - see
+`_SOURCE_TEMPLATE`) are built in. Anything else a course's content needs
+(`mhchem`, `siunitx`, ...) is **not** auto-detected from equation content -
+that doesn't generalize (it would need a growing, hardcoded macro->package
+table, and still wouldn't guarantee the package is actually installed) -
+instead it's declared explicitly via `config.yaml`'s `latex-packages` and
+wired in once per process via `configure_extra_packages`, mirroring
+`pl2docx.element_config`'s `additional-elements` pattern: one config line,
+no code change, for a package this module doesn't know about.
 
 Pipeline: `latex` (not `pdflatex` - see below) compiles a `preview`-wrapped
 snippet to a DVI, then `dvipng` rasterizes it. `dvipng --depth` is the reason
@@ -21,9 +31,8 @@ floated wrong). `pl2docx.element_renderer` uses `RenderedMath.depth_pt` to
 apply a compensating `<w:position>` (OOXML's run-level baseline shift) to
 the embedded picture's run.
 
-Requires `latex` (any TeX distribution providing it, e.g. MiKTeX/TeX Live,
-with `amsmath`/`amssymb`/`mhchem`/`xcolor`/`preview` available) and
-`dvipng` on `PATH`. Neither is a Python dependency this package can pin,
+Requires `latex` (any TeX distribution providing it, e.g. MiKTeX/TeX Live)
+and `dvipng` on `PATH`. Neither is a Python dependency this package can pin,
 unlike the rest of pl2docx's dependency list - callers must catch
 `LatexRenderError` and degrade gracefully (as `element_renderer.py` does)
 rather than assume these are always present.
@@ -36,6 +45,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -44,6 +54,7 @@ _DEFAULT_DPI = 600
 _PREVIEW_BORDER_PT = 1
 _LATEX_TIMEOUT_S = 20
 _DVIPNG_TIMEOUT_S = 20
+_KPSEWHICH_TIMEOUT_S = 10
 
 #: `\boldmath` matches PrairieLearn's own MathJax rendering, which the user
 #: confirmed (2026-08-12 visual review) uses a visibly heavier weight than
@@ -52,15 +63,17 @@ _DVIPNG_TIMEOUT_S = 20
 #: margin around the `preview` package's otherwise pixel-tight bounding box,
 #: fixing glyph-top clipping the user observed (ascenders with no descender
 #: on the same line have essentially zero margin above them without this).
-#: `mhchem`'s `version=4` silences its "no version specified" warning
-#: (cosmetic - doesn't affect rendering) without changing behavior.
+#: `amsmath`/`amssymb`/`xcolor` are the only packages loaded unconditionally
+#: - genuinely universal, virtually every TeX install has them. Anything
+#: else goes through `{extra_packages}`, filled in by `render_math_png` from
+#: `configure_extra_packages`'s module-level state - see module docstring.
 _SOURCE_TEMPLATE = r"""\documentclass[{size}pt]{{article}}
 \usepackage[active,tightpage]{{preview}}
 \setlength\PreviewBorder{{{border}pt}}
 \usepackage{{amsmath}}
 \usepackage{{amssymb}}
-\usepackage[version=4]{{mhchem}}
 \usepackage{{xcolor}}
+{extra_packages}
 \pagestyle{{empty}}
 \begin{{document}}
 \begin{{preview}}
@@ -80,6 +93,86 @@ class LatexRenderError(Exception):
     Callers should catch this and fall back to plain-text rendering rather
     than let one bad/unsupported equation fail the whole document.
     """
+
+
+class LatexPackageNotFoundError(Exception):
+    """Raised by `configure_extra_packages` when a declared package isn't installed.
+
+    Deliberately *not* a subclass of `LatexRenderError` - that exception is
+    meant to be caught per-equation, mid-render, to degrade one bad/
+    unsupported snippet to placeholder text without failing the whole
+    document. A missing package declared in `config.yaml` is a startup
+    configuration mistake instead: it affects every equation that would use
+    it, and should fail the whole run loudly and immediately (a typo'd
+    package name should never be caught by `element_renderer.py`'s
+    equation-level `except LatexRenderError`).
+    """
+
+
+#: Extra `\usepackage{...}` names (config.yaml's `latex-packages`, beyond
+#: this module's small built-in default set), set once per process by
+#: `configure_extra_packages` - see module docstring for why this is
+#: config-driven rather than auto-detected from equation content.
+_extra_packages: list[str] = []
+
+
+def configure_extra_packages(packages: Iterable[str]) -> None:
+    """Register extra LaTeX packages to load in every subsequently-rendered equation.
+
+    Parameters
+    ----------
+    packages : Iterable[str]
+        Package names (no `.sty` extension, e.g. `["mhchem"]`) to
+        `\\usepackage` in addition to this module's built-in
+        `amsmath`/`amssymb`/`xcolor` set - typically `config.yaml`'s
+        `latex-packages`, loaded once at CLI startup (`render.py`'s
+        `main()`).
+
+    Raises
+    ------
+    LatexPackageNotFoundError
+        If `kpsewhich` is on `PATH` (i.e. a LaTeX install is present) and
+        one or more of `packages` doesn't resolve via it - fails fast with
+        every missing package name, rather than each affected equation
+        silently degrading to placeholder text mid-render. Not raised at all
+        when `kpsewhich` itself isn't found on `PATH` - that's the "no LaTeX
+        install" case already handled gracefully by every `render_math_png`
+        call's own fallback, so there's nothing to validate against.
+
+    Notes
+    -----
+    Clears this module's render cache (see `_cache`) - a previously-cached
+    PNG may have been rendered under a different package configuration
+    (matters most for tests, which call this repeatedly with different
+    package sets within one process).
+    """
+    packages = list(packages)
+    kpsewhich_bin = shutil.which("kpsewhich")
+    if kpsewhich_bin is not None:
+        missing = [pkg for pkg in packages if not _package_resolves(kpsewhich_bin, pkg)]
+        if missing:
+            raise LatexPackageNotFoundError(
+                f"Configured latex-packages not found in this LaTeX install: "
+                f"{', '.join(missing)}. Check the package name(s) in config.yaml, or "
+                "install them (e.g. via the MiKTeX/TeX Live package manager)."
+            )
+
+    global _extra_packages
+    _extra_packages = packages
+    _cache.clear()
+
+
+def _package_resolves(kpsewhich_bin: str, package: str) -> bool:
+    try:
+        result = subprocess.run(
+            [kpsewhich_bin, f"{package}.sty"],
+            capture_output=True,
+            text=True,
+            timeout=_KPSEWHICH_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        return False
+    return result.returncode == 0 and bool(result.stdout.strip())
 
 
 @dataclass(frozen=True)
@@ -173,10 +266,10 @@ def render_math_png(
         size for visually consistent inline math; exact per-template
         introspection is not attempted here (see module-level docstring).
     dpi : int
-        Rasterization resolution. The output PNG carries this DPI in its own
-        metadata (`dvipng` writes a `pHYs` chunk), so `python-docx`'s
-        `add_picture` can auto-size the embedded run from the file itself -
-        callers should not pass an explicit `width=`.
+        Rasterization resolution. `RenderedMath.width_in` is computed from
+        this and the PNG's real pixel width - not from the PNG's own `pHYs`
+        metadata, which `dvipng` writes inaccurately (see `RenderedMath`'s
+        docstring).
 
     Returns
     -------
@@ -203,11 +296,14 @@ def render_math_png(
         raise LatexRenderError(
             "latex/dvipng not found on PATH - math rendering needs a LaTeX "
             "distribution (e.g. MiKTeX or TeX Live, providing amsmath/amssymb/"
-            "mhchem/xcolor/preview) and dvipng installed."
+            "xcolor/preview) and dvipng installed."
         )
 
     content = f"\\[{latex}\\]" if display_mode else f"${latex}$"
-    source = _SOURCE_TEMPLATE.format(size=font_size_pt, border=_PREVIEW_BORDER_PT, content=content)
+    extra_packages = "\n".join(f"\\usepackage{{{pkg}}}" for pkg in _extra_packages)
+    source = _SOURCE_TEMPLATE.format(
+        size=font_size_pt, border=_PREVIEW_BORDER_PT, extra_packages=extra_packages, content=content
+    )
 
     work_dir = Path(tempfile.mkdtemp(prefix="pl2docx_math_job_"))
     job_name = "eq"
