@@ -55,6 +55,7 @@ against real fetched HTML during Phase 1, not guessed:
 
 from __future__ import annotations
 
+import json
 import re
 import string
 from collections.abc import Iterable
@@ -380,12 +381,27 @@ class Widget:
         option's own source markup had (real course content has LaTeX in
         option text, confirmed by the user; not guessed). Empty for every
         fill-in-type kind.
+    option_keys : list[str or None]
+        For `multiple_choice`/`checkbox`, each option's own PL-internal answer
+        "key" (its rendered `<input>`/`<option>` `value` attribute, e.g.
+        `"a"`/`"b"`/... - confirmed identical to the key format used in the
+        page's "Variant" JSON, see `_extract_true_answer`), parallel to
+        `options` (same length, same order). `None` for any option whose
+        `value` couldn't be found. Always empty for every fill-in-type kind.
+        Used only to resolve `correct_option_indices`, not consumed by
+        rendering.
     correct_option_indices : list[int]
-        For `multiple_choice`/`checkbox`, best-effort indices into `options` that
-        `.answer-body` could be matched back to (for bolding). Always empty for
-        every fill-in-type kind, and may be empty for `multiple_choice`/
-        `checkbox` too even when the page has answer-key data — matching isn't
-        guaranteed (see `ParsedQuestion.answer_panel_text`).
+        For `multiple_choice`/`checkbox`, indices into `options` that PL's own
+        "Variant" answer-key JSON identifies as correct for this widget's
+        `name` (see `_extract_true_answer`) — authoritative, not a text-match
+        guess, and immune to another widget's overlapping option text on the
+        same page (matched via `option_keys`/`name`, not shared page-wide
+        `.answer-body` prose). Always empty for every fill-in-type kind, and
+        may be empty for `multiple_choice`/`checkbox` too when the page's
+        answer-key JSON is unavailable or has no entry for this widget's
+        `name` — `ParsedQuestion.answer_panel_text` remains the authoritative
+        "what's the correct answer" source regardless; this is only a
+        bolding enrichment on top of it.
     is_inline : bool
         For `multiple_choice`/`checkbox` rendered as radio/checkbox inputs (not a
         dropdown): whether PL's own source HTML used its inline layout
@@ -421,6 +437,7 @@ class Widget:
     kind: str
     name: str
     options: list[list[ContentNode]] = field(default_factory=list)
+    option_keys: list[str | None] = field(default_factory=list)
     correct_option_indices: list[int] = field(default_factory=list)
     is_inline: bool = False
     is_dropdown: bool = False
@@ -546,12 +563,13 @@ def parse_instance_question_html(
 
     answer_body = soup.find(class_="answer-body")
     answer_panel_text = _extract_answer_panel_text(answer_body)
+    true_answer = _extract_true_answer(soup)
     points = _extract_points(soup)
     points_numeric = _parse_points_numeric(points)
     qid = _extract_qid(soup)
 
     groups = _find_widget_groups(question_body, additional_fill_in_tags)
-    widgets = [_build_widget(group, answer_body) for group in groups]
+    widgets = [_build_widget(group, true_answer) for group in groups]
     prompt_segments = _extract_prompt_segments(question_body, groups, additional_fill_in_tags)
 
     return ParsedQuestion(
@@ -1126,14 +1144,15 @@ def _add_fill_in_groups(question_body: Tag, tag: str, kind: str, add) -> None:
         add(kind, input_tag.get("name", ""), container)
 
 
-def _build_widget(group: _WidgetGroup, answer_body: Tag | None) -> Widget:
+def _build_widget(group: _WidgetGroup, true_answer: dict | None) -> Widget:
     if group.kind in ("multiple_choice", "checkbox"):
-        options = _extract_group_options(group)
+        options, option_keys = _extract_group_options(group)
         return Widget(
             kind=group.kind,
             name=group.name,
             options=options,
-            correct_option_indices=_extract_correct_option_indices(answer_body, options),
+            option_keys=option_keys,
+            correct_option_indices=_extract_correct_option_indices(group.name, option_keys, true_answer),
             is_inline=_extract_group_is_inline(group),
             is_dropdown=group.is_dropdown,
         )
@@ -1141,11 +1160,27 @@ def _build_widget(group: _WidgetGroup, answer_body: Tag | None) -> Widget:
     return Widget(kind=group.kind, name=group.name, label=label, suffix=suffix, width_chars=width_chars)
 
 
-def _extract_group_options(group: _WidgetGroup) -> list[list[ContentNode]]:
+def _extract_group_options(
+    group: _WidgetGroup,
+) -> tuple[list[list[ContentNode]], list[str | None]]:
+    """Extract each option's rich content, alongside its own PL answer "key".
+
+    Returns
+    -------
+    tuple[list[list[ContentNode]], list[str or None]]
+        `(options, option_keys)`, parallel lists (same length, same order).
+        Each key is the option's own rendered `value` attribute — confirmed
+        against `pl-multiple-choice.mustache`/`pl-checkbox.mustache`:
+        `value="{{key}}"` on every `<input>`/`<option>`, so this is exactly
+        the same key format `_extract_true_answer`'s JSON uses, letting
+        `_extract_correct_option_indices` match the two directly.
+    """
     if group.is_dropdown:
-        options = []
+        options: list[list[ContentNode]] = []
+        option_keys: list[str | None] = []
         for option in group.containers[0].find_all("option"):
-            if not option.get("value"):
+            value = option.get("value")
+            if not value:
                 continue  # the blank placeholder option
             content = option.get("data-content", "")
             content = re.sub(r"^\([A-Za-z0-9]+\)\s*", "", content).strip()
@@ -1153,14 +1188,31 @@ def _extract_group_options(group: _WidgetGroup) -> list[list[ContentNode]]:
                 _walk_content(option)  # type: ignore[arg-type]
             )
             options.append(nodes)
-        return options
+            option_keys.append(value)
+        return options, option_keys
 
     options = []
+    option_keys = []
     for container in group.containers:
         answer = container.find(class_=["pl-multiple-choice-answer", "pl-checkbox-answer"])
         if answer is not None:
             options.append(_normalize_nodes(_walk_content(answer)))  # type: ignore[arg-type]
-    return options
+            input_tag = _find_named_input(container, group.name)
+            option_keys.append(input_tag.get("value") if input_tag is not None else None)
+    return options, option_keys
+
+
+def _find_named_input(container: Tag, name: str) -> Tag | None:
+    """Find the `name`-matching `<input>`/`<select>` within (or as) `container`.
+
+    `group.containers[i]` may be the input itself (the bare-element fallback
+    in `_find_widget_groups`, when no `.form-check` parent exists), not just
+    a wrapping container — `Tag.find()` only searches descendants, never the
+    tag itself, so that case needs an explicit self-check first.
+    """
+    if container.name in ("input", "select") and container.get("name") == name:
+        return container
+    return container.find(attrs={"name": name})
 
 
 def _extract_group_is_inline(group: _WidgetGroup) -> bool:
@@ -1214,31 +1266,57 @@ def _precedes(tag: Tag, other: Tag) -> bool:
 
 
 def _extract_correct_option_indices(
-    answer_body: Tag | None, options: list[list[ContentNode]]
+    name: str, option_keys: list[str | None], true_answer: dict | None
 ) -> list[int]:
-    """Best-effort match of `.answer-body`'s `<li>` items back to `options`.
+    """Resolve which of this widget's own options PL's "Variant" JSON marks correct.
 
-    Returns an empty list whenever nothing matches — e.g. a question whose
-    answer panel holds custom-authored explanatory text instead of PL's
-    default `<li>(key) option text</li>` list (see module docstring on
-    `pl-hide-in-panel`). Not matching is expected/normal, not an error:
-    `answer_panel_text` remains the authoritative answer regardless.
+    Replaces an earlier text-matching approach (search the page-wide
+    `.answer-body` for an `<li>` whose text contained an option's text) that
+    was confirmed unreliable two ways: (1) a question that wraps its default
+    answer markup in `<pl-hide-in-panel answer="true">` and supplies custom
+    explanatory prose instead has no matching `<li>` at all; (2) `.answer-body`
+    is one combined, unmarked panel for the *whole page*, so a compound
+    question with multiple widgets sharing overlapping option text (real
+    content: `intro/practice/physical-or-chemical`'s 3 `pl-multiple-choice`
+    dropdowns, all offering "chemical property"/"physical property") could
+    match another widget's `<li>` instead of its own, mis-highlighting every
+    such widget. This is scoped by `name` from the start instead, so neither
+    failure mode is possible.
 
-    Matches on `plain_text(option)` (formatting/math stripped) — this is a
-    coarse text-containment check, not aiming to preserve rich content, so
-    flattening both sides first keeps it simple.
+    Parameters
+    ----------
+    name : str
+        This widget's own `name` attribute — the `true_answer` dict's
+        top-level key for this widget specifically.
+    option_keys : list[str or None]
+        This widget's own `Widget.option_keys`, parallel to `options`.
+    true_answer : dict or None
+        The page's parsed "Variant" answer JSON (`_extract_true_answer`), or
+        `None` if unavailable.
+
+    Returns
+    -------
+    list[int]
+        Indices into this widget's own `options`/`option_keys` whose key
+        appears in `true_answer[name]`'s correct-answer key set. Empty
+        whenever `true_answer` is `None`, has no entry for `name`, or that
+        entry's shape is unrecognized — never raises; `answer_panel_text`
+        remains the authoritative "what's the correct answer" source
+        regardless (see its own docstring), this is only a bolding
+        enrichment on top of it. Handles both `pl-multiple-choice`'s
+        single-dict shape (`{"key": ..., ...}`) and `pl-checkbox`'s
+        list-of-dicts shape (multi-answer) generically — confirmed against
+        each element's own Python source (`data["correct_answers"][name]`),
+        not guessed.
     """
-    if answer_body is None:
+    if not true_answer or name not in true_answer:
         return []
-    indices: list[int] = []
-    for li in answer_body.find_all("li"):
-        li_text = li.get_text(strip=True)
-        for idx, option in enumerate(options):
-            option_text = plain_text(option)
-            if option_text and option_text in li_text and idx not in indices:
-                indices.append(idx)
-                break
-    return indices
+    entry = true_answer[name]
+    entries = entry if isinstance(entry, list) else [entry]
+    correct_keys = {e.get("key") for e in entries if isinstance(e, dict) and e.get("key") is not None}
+    if not correct_keys:
+        return []
+    return [idx for idx, key in enumerate(option_keys) if key in correct_keys]
 
 
 def _extract_prompt_segments(
@@ -1328,6 +1406,52 @@ def _extract_qid(soup: BeautifulSoup) -> str | None:
         return None
     text = value_tag.get_text(strip=True)
     return text or None
+
+
+def _extract_true_answer(soup: BeautifulSoup) -> dict | None:
+    """Extract PL's own `variant.true_answer` JSON from the "Variant" staff-info panel.
+
+    Confirmed against the real PrairieLearn source
+    (`InstructorInfoPanel.tsx`'s `VariantInfo`): staff-role pages (Previewer+,
+    same role this tool already authenticates and fetches as - see
+    `pl_client.py`'s module docstring) server-render
+    `<details><summary>Show/Hide answer</summary><pre><code>{JSON.stringify(
+    variant.true_answer, null, 2)}</code></pre></details>` regardless of
+    `showCorrectAnswer`/`<pl-hide-in-panel>` suppression - this is the
+    variant's real stored correct-answer data, keyed by each named input's
+    own `name` - unlike `.answer-body`'s free-form `<li>` prose, it's not
+    subject to `<pl-hide-in-panel>` suppression or cross-widget ambiguity.
+    Confirmed present in already-fetched real HTML
+    (`output/125/blank/1838.html`) and matches each rendered
+    `<input>`/`<option>`'s own `value` attribute exactly (both set to the
+    same PL-internal answer "key" - see `pl-multiple-choice.mustache`/
+    `pl-checkbox.mustache`'s `value="{{key}}"`).
+
+    Returns
+    -------
+    dict or None
+        The parsed JSON object, or `None` if the panel isn't present at all
+        (a fetch under insufficient staff permissions - shouldn't happen
+        given this tool's own auth model, but handled defensively), its
+        content isn't valid JSON, or the parsed value isn't a non-empty
+        dict (e.g. a question with no named inputs at all) - callers should
+        treat any of these the same way (no per-widget answer-key data
+        available), never raise.
+    """
+    summary = soup.find("summary", string=lambda s: s is not None and s.strip() == "Show/Hide answer")
+    if summary is None:
+        return None
+    pre = summary.find_next_sibling("pre")
+    if pre is None:
+        return None
+    code = pre.find("code")
+    if code is None:
+        return None
+    try:
+        data = json.loads(code.get_text())
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) and data else None
 
 
 def format_points_text(points_numeric: float | None, points_raw: str | None) -> str | None:

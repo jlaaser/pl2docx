@@ -27,6 +27,10 @@ def _options(widget) -> list[str]:
     return [plain_text(opt) for opt in widget.options]
 
 
+def _option_keys(widget) -> list[str | None]:
+    return widget.option_keys
+
+
 def _label(widget) -> str | None:
     return plain_text(widget.label) if widget.label is not None else None
 
@@ -59,18 +63,22 @@ def test_multiple_choice_key():
     widget = q.widgets[0]
     assert widget.kind == "multiple_choice"
     assert _options(widget) == ["Option A text", "Option B text", "Option C text"]
+    assert _option_keys(widget) == ["a", "b", "c"]
     assert widget.correct_option_indices == [1]
     assert _answer(q) == "(B) Option B text"
     assert q.points == "1"
 
 
 def test_multiple_choice_hidden_answer_key():
-    """Answer panel with custom explanatory text (pl-hide-in-panel-suppressed default list)."""
+    """Answer panel with custom explanatory text (pl-hide-in-panel-suppressed default
+    list) has no <li> for the old text-matching approach to find at all - but the
+    "Variant" panel's JSON is independent of that suppression, so correct_option_indices
+    must still resolve correctly via it (this was bug #1 of the two reported: the old
+    approach silently gave up here)."""
     q = parse_instance_question_html(_load("multiple_choice_hidden_answer_key.html"))
     widget = q.widgets[0]
     assert widget.kind == "multiple_choice"
-    # No <li> to match against options -> no bolding hint, but this must not raise.
-    assert widget.correct_option_indices == []
+    assert widget.correct_option_indices == [1]
     assert _answer(q) == (
         "Option B is correct because it is the only statement consistent with the setup described above."
     )
@@ -112,6 +120,7 @@ def test_checkbox_key():
     q = parse_instance_question_html(_load("checkbox_key.html"))
     widget = q.widgets[0]
     assert widget.kind == "checkbox"
+    assert _option_keys(widget) == ["a", "b", "c"]
     assert widget.correct_option_indices == [0, 2]
     assert _answer(q) == "(A) Choice A text (C) Choice C text"
 
@@ -224,6 +233,126 @@ def test_compound_dropdown_question_is_supported():
     assert all(w.is_dropdown for w in q.widgets)
     assert _options(q.widgets[0]) == ["A0"]
     assert _options(q.widgets[1]) == ["A1"]
+
+
+def _true_answer_panel(json_text: str) -> str:
+    return f"""
+    <div class="card mb-3 border-warning">
+      <div class="card-header bg-warning"><h2>Staff information</h2></div>
+      <div class="list-group list-group-flush">
+        <div class="list-group-item py-3">
+          <h3 class="card-title h5">Variant</h3>
+          <div class="d-flex flex-wrap">
+            <details class="pe-1">
+              <summary>Show/Hide answer</summary>
+              <pre class="mt-2 mb-0"><code>{json_text}</code></pre>
+            </details>
+          </div>
+        </div>
+      </div>
+    </div>
+    """
+
+
+def test_compound_dropdowns_with_overlapping_options_each_get_own_correct_answer():
+    """Regression for the real reported bug: `physical-or-chemical` renders 3
+    separate `pl-multiple-choice` dropdowns sharing the *identical* two options
+    ("chemical property"/"physical property") - the old page-wide `.answer-body`
+    text-matching approach could match one widget's answer key against a *different*
+    widget's identical option text. Matching via the "Variant" JSON's per-`name` keys
+    must keep each widget's correct_option_indices scoped to its own answer only."""
+    html = (
+        """
+    <div class="question-block">
+      <div class="card-header"><h1>Physical or chemical</h1></div>
+      <div class="card-body question-body">
+        <span class="pl-multiple-choice-dropdown">
+          <select name="statement-0">
+            <option value="a" data-content="(a) chemical property">chemical property</option>
+            <option value="b" data-content="(b) physical property">physical property</option>
+          </select>
+        </span>
+        <span class="pl-multiple-choice-dropdown">
+          <select name="statement-1">
+            <option value="a" data-content="(a) chemical property">chemical property</option>
+            <option value="b" data-content="(b) physical property">physical property</option>
+          </select>
+        </span>
+        <span class="pl-multiple-choice-dropdown">
+          <select name="statement-2">
+            <option value="a" data-content="(a) chemical property">chemical property</option>
+            <option value="b" data-content="(b) physical property">physical property</option>
+          </select>
+        </span>
+      </div>
+    </div>
+    """
+        + _true_answer_panel(
+            """{
+  "statement-0": {"key": "b", "html": "physical property", "score": 1, "feedback": null},
+  "statement-1": {"key": "a", "html": "chemical property", "score": 1, "feedback": null},
+  "statement-2": {"key": "a", "html": "chemical property", "score": 1, "feedback": null}
+}"""
+        )
+    )
+    q = parse_instance_question_html(html)
+    by_name = {w.name: w for w in q.widgets}
+    assert _options(by_name["statement-0"]) == ["chemical property", "physical property"]
+    assert by_name["statement-0"].correct_option_indices == [1]
+    assert by_name["statement-1"].correct_option_indices == [0]
+    assert by_name["statement-2"].correct_option_indices == [0]
+
+
+def test_multiple_choice_radio_no_variant_panel_yields_empty_correct_indices():
+    """No "Variant" panel at all (e.g. a blank-copy fetch, or a page fetched under
+    insufficient staff permissions) must degrade to no highlighting, not raise."""
+    html = """
+    <div class="question-block">
+      <div class="card-header"><h1>No variant panel</h1></div>
+      <div class="card-body question-body">
+        <div class="form-check">
+          <input type="radio" name="statement" value="a" id="a">
+          <label class="form-check-label" for="a"><div class="pl-multiple-choice-answer">Option A</div></label>
+        </div>
+      </div>
+    </div>
+    """
+    q = parse_instance_question_html(html)
+    assert q.widgets[0].correct_option_indices == []
+
+
+def _radio_question_html(extra: str = "") -> str:
+    return f"""
+    <div class="question-block">
+      <div class="card-header"><h1>Variant panel edge cases</h1></div>
+      <div class="card-body question-body">
+        <div class="form-check">
+          <input type="radio" name="statement" value="a" id="a">
+          <label class="form-check-label" for="a"><div class="pl-multiple-choice-answer">Option A</div></label>
+        </div>
+      </div>
+    </div>
+    {extra}
+    """
+
+
+def test_variant_panel_malformed_json_yields_empty_correct_indices():
+    html = _radio_question_html(_true_answer_panel("{not valid json"))
+    q = parse_instance_question_html(html)
+    assert q.widgets[0].correct_option_indices == []
+
+
+def test_variant_panel_non_dict_json_yields_empty_correct_indices():
+    """`variant.true_answer` can itself be JSON `null` (no named inputs) - must not raise."""
+    html = _radio_question_html(_true_answer_panel("null"))
+    q = parse_instance_question_html(html)
+    assert q.widgets[0].correct_option_indices == []
+
+
+def test_variant_panel_entry_missing_for_widget_name_yields_empty_correct_indices():
+    html = _radio_question_html(_true_answer_panel('{"some-other-name": {"key": "a"}}'))
+    q = parse_instance_question_html(html)
+    assert q.widgets[0].correct_option_indices == []
 
 
 def test_fill_in_label_and_suffix_extracted():
