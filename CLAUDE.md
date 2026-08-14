@@ -30,6 +30,11 @@ Design/planning notes:
 - Full design/planning doc for this project: `planning_notes/2026-08-05_printable_assignments_planning.md`) — read this before making architectural
   changes; it captures the reasoning behind the approach below, not just the conclusions.
 - Per-phase session handoff notes (read the most recent one first when resuming work):
+  `planning_notes/2026-08-14 phase 7 implementation and design decisions.md`
+  (pl-rich-text-editor/pl-matching/pl-order-blocks/pl-big-o-input; a real answer-leak
+  bug found and fixed — blank-copy HTML was resolving correct-answer data too, now
+  gated behind a new `is_answer_key` parse flag; plus two cross-cutting formatting
+  fixes — spurious inter-run spacing, configurable block-display indent),
   `planning_notes/2026-08-13 phase 5 implementation and design decisions.md` (SVG
   embedding, canvas capture, zero-widget questions — replaces the original Phase 5/6
   adapter-interface plan), `planning_notes/2026-08-12 phase 4 implementation and
