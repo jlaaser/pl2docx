@@ -55,6 +55,15 @@ template_path: "template.docx"
 # default).
 restart_numbering_per_zone: false
 
+# Left indent (inches) for every widget whose content renders as its own block -
+# a fresh paragraph or table, not sharing a line with prompt text. Covers
+# multiple-choice/checkbox/fill-in-type widgets in "block" display (whether an
+# explicit config override or the auto-detected default for a non-inline,
+# non-dropdown selector), plus pl-matching and pl-order-blocks (always
+# block-shaped, since neither exposes a display setting of its own). A single
+# global value, not configurable per element kind. Set to 0 to disable.
+block_display_indent_inches: 0.125
+
 # Phase 3B: per-element formatting preferences (all keys optional; omitting this
 # section entirely applies built-in defaults for every widget kind). See
 # pl2docx.element_config for the full field reference. Built-in fill-in-type

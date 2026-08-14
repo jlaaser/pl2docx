@@ -78,6 +78,23 @@ class Config:
         restarts at 1 at the beginning of every zone, instead of running
         continuously across the whole document. `False` (the default) matches
         PL's own numbering convention and this project's original behavior.
+    block_display_indent_inches : float
+        Left indent applied to every widget whose content renders as its own
+        block (a fresh paragraph or table, not sharing a line with prompt
+        text) - `pl-multiple-choice`/`pl-checkbox`/fill-in-type widgets with
+        `display: block` (whether that's an explicit config override or the
+        auto-detected default for a non-inline, non-dropdown selector), plus
+        `pl-matching` and `pl-order-blocks` (always block-shaped - a table by
+        default, or two paragraphs for `pl-order-blocks`' `horizontal`
+        layout), regardless of `display` since neither kind exposes that
+        setting. A single global value, not configurable per element kind -
+        see `pl2docx.element_renderer`'s `DEFAULT_BLOCK_DISPLAY_INDENT_INCHES`
+        for exactly which widgets/paragraphs this applies to (this field's own
+        default, `0.125`, is intentionally kept in sync with that constant by
+        hand rather than imported from it - `pl2docx.element_renderer` pulls
+        in `python-docx`/`docxtpl`/`playwright`, deliberately heavier
+        dependencies this module stays free of). `0` disables indentation
+        entirely.
 
     Notes
     -----
@@ -96,6 +113,7 @@ class Config:
     latex_packages: list[str] = field(default_factory=list)
     instance_ids: list[str] | None = None
     restart_numbering_per_zone: bool = False
+    block_display_indent_inches: float = 0.125
 
 
 def load_config(path: str | Path) -> Config:
@@ -143,4 +161,5 @@ def load_config(path: str | Path) -> Config:
         latex_packages=[str(pkg) for pkg in (raw.get("latex-packages") or [])],
         instance_ids=[str(i) for i in raw["instance_ids"]] if raw.get("instance_ids") else None,
         restart_numbering_per_zone=bool(raw.get("restart_numbering_per_zone", False)),
+        block_display_indent_inches=float(raw.get("block_display_indent_inches", 0.125)),
     )

@@ -18,7 +18,7 @@ from docx.opc.exceptions import PackageNotFoundError
 from docxtpl import DocxTemplate
 
 from pl2docx.element_config import ElementConfig
-from pl2docx.element_renderer import build_question_context, create_list_formats
+from pl2docx.element_renderer import DEFAULT_BLOCK_DISPLAY_INDENT_INCHES, build_question_context, create_list_formats
 from pl2docx.html_parser import ParsedQuestion
 
 
@@ -48,6 +48,7 @@ def render_document(
     element_config: ElementConfig | None = None,
     image_base_dir: Path | None = None,
     instance_id: str | None = None,
+    block_display_indent_inches: float = DEFAULT_BLOCK_DISPLAY_INDENT_INCHES,
 ) -> None:
     """Render `zones` into a docx built from `template_path`.
 
@@ -94,6 +95,10 @@ def render_document(
         and passed straight through here (see `Config.instance_ids`'s
         docstring). `None` (the default) renders as an empty string in the
         template, same as any other unset Jinja variable.
+    block_display_indent_inches : float
+        Passed straight through to
+        `pl2docx.element_renderer.build_question_context` for every question —
+        see its docstring / `pl2docx.config.Config.block_display_indent_inches`.
 
     Raises
     ------
@@ -131,7 +136,13 @@ def render_document(
             "title": zone["title"],
             "questions": [
                 build_question_context(
-                    tpl, question, number, element_config, image_base_dir, list_formats
+                    tpl,
+                    question,
+                    number,
+                    element_config,
+                    image_base_dir,
+                    list_formats,
+                    block_display_indent_inches,
                 )
                 for question, number in zone["questions"]
             ],

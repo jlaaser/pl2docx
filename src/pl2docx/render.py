@@ -24,6 +24,7 @@ from pl2docx.element_config import (
     additional_fill_in_tags,
     load_element_config,
 )
+from pl2docx.element_renderer import DEFAULT_BLOCK_DISPLAY_INDENT_INCHES
 from pl2docx.html_parser import ParsedQuestion, parse_instance_question_html
 from pl2docx.latex_math import configure_extra_packages
 
@@ -90,6 +91,7 @@ def render_instance(
     template_path: Path,
     element_config: ElementConfig | None = None,
     restart_numbering_per_zone: bool = False,
+    block_display_indent_inches: float = DEFAULT_BLOCK_DISPLAY_INDENT_INCHES,
 ) -> tuple[Path, Path]:
     """Render an instance's fetched HTML into blank + key docx files.
 
@@ -111,6 +113,11 @@ def render_instance(
         `None` (the default) applies built-in defaults for every widget kind.
     restart_numbering_per_zone : bool
         Passed straight through to `_build_zones` — see its docstring.
+    block_display_indent_inches : float
+        Passed straight through to `pl2docx.docx_builder.render_document` for
+        both the blank and key renders — see
+        `pl2docx.element_renderer.build_question_context`'s docstring /
+        `pl2docx.config.Config.block_display_indent_inches`.
 
     Returns
     -------
@@ -147,6 +154,7 @@ def render_instance(
         element_config=element_config,
         image_base_dir=instance_dir / "blank",
         instance_id=instance_id_display,
+        block_display_indent_inches=block_display_indent_inches,
     )
     render_document(
         template_path,
@@ -162,6 +170,7 @@ def render_instance(
         element_config=element_config,
         image_base_dir=instance_dir / "key",
         instance_id=instance_id_display,
+        block_display_indent_inches=block_display_indent_inches,
     )
     return blank_path, key_path
 
@@ -178,12 +187,14 @@ def main() -> None:
     element_config = load_element_config("config.yaml")
     config_path = Path("config.yaml")
     restart_numbering_per_zone = False
+    block_display_indent_inches = DEFAULT_BLOCK_DISPLAY_INDENT_INCHES
     if config_path.exists():
         run_config = load_config(config_path)
         configure_extra_packages(run_config.latex_packages)
         restart_numbering_per_zone = run_config.restart_numbering_per_zone
+        block_display_indent_inches = run_config.block_display_indent_inches
     blank_path, key_path = render_instance(
-        instance_dir, template_path, element_config, restart_numbering_per_zone
+        instance_dir, template_path, element_config, restart_numbering_per_zone, block_display_indent_inches
     )
     print(f"Wrote {blank_path}")
     print(f"Wrote {key_path}")

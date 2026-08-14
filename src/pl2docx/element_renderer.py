@@ -91,6 +91,17 @@ logger = logging.getLogger(__name__)
 
 ANSWER_SPACE_BLANK_LINES = 2
 
+#: Default left indent (inches) for any widget whose content renders as its
+#: own block - see `pl2docx.config.Config.block_display_indent_inches` (the
+#: config.yaml-facing knob this mirrors) for the full list of what "block"
+#: covers here: selector/fill-in widgets in "block" display (explicit or
+#: auto-detected), plus `pl-matching`/`pl-order-blocks` (always block-shaped,
+#: since neither exposes a `display` setting of its own). A single global
+#: value, not configurable per element kind - kept simple since the request
+#: behind this was purely visual (distinguish a block-display widget's own
+#: content from the surrounding prompt text), not a per-kind formatting need.
+DEFAULT_BLOCK_DISPLAY_INDENT_INCHES = 0.125
+
 #: CSS reference pixel, per the W3C spec PL's own display sizing uses
 #: (`<img width>` is in CSS px, at a fixed 96px/inch) - not a guess.
 _CSS_PX_PER_INCH = 96
@@ -329,6 +340,7 @@ def build_question_context(
     element_config: ElementConfig,
     image_base_dir: Path | None = None,
     list_formats: ListFormats | None = None,
+    block_display_indent_inches: float = DEFAULT_BLOCK_DISPLAY_INDENT_INCHES,
 ) -> dict:
     """Build one question's Jinja context dict, including its 4 Subdocs.
 
@@ -365,6 +377,12 @@ def build_question_context(
         per question). `None` (the default) falls back to plain prepended
         `"1. "`/`"• "` marker text for lists - not a real Word list - same
         as before this parameter existed.
+    block_display_indent_inches : float
+        Left indent (inches) applied to every block-display widget's own
+        content - see `DEFAULT_BLOCK_DISPLAY_INDENT_INCHES` and
+        `pl2docx.config.Config.block_display_indent_inches` for exactly what
+        counts as "block" here. Defaults to `DEFAULT_BLOCK_DISPLAY_INDENT_INCHES`
+        (0.125in); `0` disables indentation entirely.
 
     Returns
     -------
@@ -385,7 +403,7 @@ def build_question_context(
         vanishing entirely.
     """
     question_contents, answer_element, has_answer_element = _build_question_contents(
-        tpl, question, element_config, image_base_dir, list_formats
+        tpl, question, element_config, image_base_dir, list_formats, block_display_indent_inches
     )
     return {
         "number": number,
@@ -407,6 +425,7 @@ def _build_question_contents(
     element_config: ElementConfig,
     image_base_dir: Path | None,
     list_formats: ListFormats | None = None,
+    block_display_indent_inches: float = DEFAULT_BLOCK_DISPLAY_INDENT_INCHES,
 ):
     subdoc = tpl.new_subdoc()
     answer_element = tpl.new_subdoc()
@@ -453,11 +472,11 @@ def _build_question_contents(
             _render_rich_text_editor(subdoc, state, widget, prefs)
             continue
         if widget.kind == "matching":
-            _render_matching(subdoc, state, widget, image_base_dir)
+            _render_matching(subdoc, state, widget, image_base_dir, block_display_indent_inches)
             continue
         if widget.kind == "order_blocks":
             prefs = resolve_preferences(element_config, widget.kind)
-            _render_order_blocks(subdoc, state, widget, prefs, image_base_dir)
+            _render_order_blocks(subdoc, state, widget, prefs, image_base_dir, block_display_indent_inches)
             continue
 
         prefs = resolve_preferences(element_config, widget.kind)
@@ -492,10 +511,16 @@ def _build_question_contents(
             # multiple-choice/checkbox options.
             if first_paragraph is not None and first_paragraph.runs:
                 first_paragraph.add_run().add_break()
+            # Indentation only applies to a genuinely fresh paragraph
+            # (first_paragraph is None) - a reused list-item paragraph is
+            # already offset by its own list numbering/indent, and stacking
+            # this indent on top of that would look inconsistent with every
+            # other list item's own indent level.
+            block_indent = block_display_indent_inches if first_paragraph is None else 0
             runs = (
-                _render_selector_block(target, widget, prefs, image_base_dir, first_paragraph)
+                _render_selector_block(target, widget, prefs, image_base_dir, first_paragraph, block_indent)
                 if is_selector
-                else _render_fill_in_block(target, widget, prefs, image_base_dir, first_paragraph)
+                else _render_fill_in_block(target, widget, prefs, image_base_dir, first_paragraph, block_indent)
             )
             # Only start a fresh paragraph when this widget wasn't reusing an
             # already-list-numbered paragraph (first_paragraph is None) - when
@@ -564,6 +589,45 @@ def _append_run_text(
         return None
     if paragraph.runs and not paragraph.runs[-1].text.endswith(" ") and not text.startswith(" "):
         paragraph.add_run(" ")
+    run = paragraph.add_run(text)
+    run.bold = bold
+    run.italic = italic
+    run.underline = underline
+    if color:
+        run.font.color.rgb = RGBColor.from_string(color)
+    return run
+
+
+def _add_formatted_run(
+    paragraph, text: str, bold: bool = False, italic: bool = False, underline: bool = False,
+    color: str | None = None,
+):
+    """Add one run of `text` to `paragraph`, with no synthetic separating space.
+
+    Use this (not `_append_run_text`) for every `ContentNode` rendered as part
+    of a single source's continuous rich-text flow - `TextRun`s, a `MathRef`'s
+    plain-text fallback, an image/SVG's alt-text fallback. Two adjacent nodes
+    in that flow already encode whatever real whitespace (or lack of it)
+    existed between them in the source HTML - `_walk_into`/`_split_math_delimiters`
+    never fabricate or drop a boundary space, so by the time nodes reach here,
+    concatenating them directly is what's faithful to the source.
+
+    **Confirmed real bug this was written to fix**: `_append_run_text`'s
+    auto-space heuristic (add a space whenever the previous run doesn't
+    already end in one) was being applied here too, so any bold/colored/math
+    span sitting directly next to plain text with *no* space between them in
+    the source (e.g. `"...indicated in <span style=color:red>red</span>. Numbers..."`,
+    or `"($<math>C_2H_6</math>$)"`) rendered with a spurious extra space
+    (`"red ."`, `"( C_2H_6 )"`) - visible in real generated docx output, not
+    just a theoretical edge case. `_append_run_text`'s auto-space behavior is
+    still correct and still used for genuinely separate chunks *this module*
+    assembles with no inherent source adjacency of its own (fill-in
+    label/blank/suffix, prompt text before/after a widget, multiple-choice's
+    inter-option spacer, list marker prefixes) - those aren't nodes from one
+    continuous flow, so there's no "original spacing" to preserve for them.
+    """
+    if not text:
+        return None
     run = paragraph.add_run(text)
     run.bold = bold
     run.italic = italic
@@ -697,7 +761,7 @@ def _list_marker_text(node: ListItemStart) -> str:
 
 def _render_one_node(paragraph, node: ContentNode, image_base_dir: Path | None = None) -> Run | None:
     if isinstance(node, TextRun):
-        return _append_run_text(paragraph, node.text, node.bold, node.italic, node.underline, node.color)
+        return _add_formatted_run(paragraph, node.text, node.bold, node.italic, node.underline, node.color)
     if isinstance(node, ParagraphBreak):
         # Only reached via `_render_nodes_to_paragraph` (inline widget content) -
         # `_render_nodes_into_subdoc` intercepts `ParagraphBreak` itself to start
@@ -741,7 +805,7 @@ def _render_math(paragraph, node: MathRef) -> Run | None:
     except LatexRenderError as exc:
         logger.warning("Falling back to plain-text math for %r: %s", node.latex, exc)
         delim = "$$" if node.display_mode else "$"
-        return _append_run_text(paragraph, f"{delim}{node.latex}{delim}")
+        return _add_formatted_run(paragraph, f"{delim}{node.latex}{delim}")
     image_ref = ImageRef(local_path=rendered.png_path.name, alt=node.latex)
     run = _render_image(
         paragraph,
@@ -767,7 +831,7 @@ def _render_svg(paragraph, node: SvgRef) -> Run | None:
         rendered = render_svg_png(node.svg_markup)
     except SvgRenderError as exc:
         logger.warning("Falling back to alt text for inline SVG: %s", exc)
-        return _append_run_text(paragraph, node.alt)
+        return _add_formatted_run(paragraph, node.alt)
     image_ref = ImageRef(local_path=rendered.png_path.name, alt=node.alt)
     return _render_image(
         paragraph,
@@ -789,16 +853,16 @@ def _render_svg_image_ref(paragraph, node: ImageRef, image_base_dir: Path) -> Ru
     """
     image_path = image_base_dir / node.local_path
     if not image_path.is_file():
-        return _append_run_text(paragraph, node.alt or "[image]")
+        return _add_formatted_run(paragraph, node.alt or "[image]")
     try:
         svg_markup = image_path.read_text(encoding="utf-8")
     except OSError:
-        return _append_run_text(paragraph, node.alt or "[image]")
+        return _add_formatted_run(paragraph, node.alt or "[image]")
     try:
         rendered = render_svg_png(svg_markup)
     except SvgRenderError as exc:
         logger.warning("Falling back to alt text for %s: %s", node.local_path, exc)
-        return _append_run_text(paragraph, node.alt or "[image]")
+        return _add_formatted_run(paragraph, node.alt or "[image]")
     # Prefer the source <img width> (PL's own intended on-page size) over the
     # SVG's own intrinsic size when both are available, matching how every
     # other ImageRef already prioritizes node.width_px over default_width.
@@ -857,8 +921,11 @@ def _render_image(
     if image_base_dir is not None and node.local_path:
         image_path = image_base_dir / node.local_path
         if image_path.is_file():
-            if paragraph.runs and not paragraph.runs[-1].text.endswith(" "):
-                paragraph.add_run(" ")
+            # No synthetic leading space here - an image node is just another
+            # node in the same continuous rich-text flow as its neighboring
+            # TextRuns (see _add_formatted_run's docstring); the source HTML's
+            # own real adjacency (e.g. "(<img>)" with no space either side)
+            # must be preserved, not padded.
             run = paragraph.add_run()
             width = Inches(node.width_px / _CSS_PX_PER_INCH) if node.width_px else default_width
             try:
@@ -866,7 +933,7 @@ def _render_image(
                 return run
             except Exception:
                 pass
-    return _append_run_text(paragraph, node.alt or "[image]")
+    return _add_formatted_run(paragraph, node.alt or "[image]")
 
 
 def _resolve_display(widget: Widget, prefs: ElementPreferences) -> str:
@@ -904,7 +971,8 @@ def _render_fill_in_inline(paragraph, widget: Widget, prefs, image_base_dir: Pat
 
 
 def _render_selector_block(
-    sink, widget: Widget, prefs, image_base_dir: Path | None = None, first_paragraph=None
+    sink, widget: Widget, prefs, image_base_dir: Path | None = None, first_paragraph=None,
+    block_indent_inches: float = 0,
 ) -> list[Run]:
     """Render each option as its own paragraph - or, given `first_paragraph`
     (this widget is a list item's own content), *all* options into that one
@@ -923,6 +991,11 @@ def _render_selector_block(
     within the same `<li>` - is handled by the caller, `_build_question_contents`,
     once, before this function is even called - not selector-specific, so it
     applies uniformly to any block-display widget kind.)
+
+    `block_indent_inches` (see `DEFAULT_BLOCK_DISPLAY_INDENT_INCHES`) is only
+    ever applied to a *fresh* per-option paragraph, never to `first_paragraph`
+    - the caller already passes `0` there (see `_build_question_contents`),
+    since a reused list-item paragraph has its own list-level indent already.
     """
     runs: list[Run] = []
     single_paragraph_mode = first_paragraph is not None
@@ -933,6 +1006,7 @@ def _render_selector_block(
                 paragraph.add_run().add_break()
         else:
             paragraph = sink.add_paragraph()
+            _apply_block_indent(paragraph, block_indent_inches)
         marker_start = len(paragraph.runs)
         marker = _LIST_MARKERS[prefs.list_style](idx)
         marker_run = _append_run_text(paragraph, f"{marker} ")
@@ -947,9 +1021,14 @@ def _render_selector_block(
 
 
 def _render_fill_in_block(
-    sink, widget: Widget, prefs, image_base_dir: Path | None = None, first_paragraph=None
+    sink, widget: Widget, prefs, image_base_dir: Path | None = None, first_paragraph=None,
+    block_indent_inches: float = 0,
 ) -> list[Run]:
-    paragraph = first_paragraph if first_paragraph is not None else sink.add_paragraph()
+    if first_paragraph is not None:
+        paragraph = first_paragraph
+    else:
+        paragraph = sink.add_paragraph()
+        _apply_block_indent(paragraph, block_indent_inches)
     return _fill_in_runs(paragraph, widget, prefs, image_base_dir)
 
 
@@ -1098,7 +1177,33 @@ def _style_two_column_table(table) -> None:
     tbl_pr.append(cell_mar)
 
 
-def _render_matching(subdoc, state: dict, widget: Widget, image_base_dir: Path | None) -> None:
+def _apply_block_indent(paragraph, indent_inches: float) -> None:
+    """Left-indent `paragraph` by `indent_inches` - a no-op when `indent_inches <= 0`."""
+    if indent_inches > 0:
+        paragraph.paragraph_format.left_indent = Inches(indent_inches)
+
+
+def _apply_table_indent(table, indent_inches: float) -> None:
+    """Left-indent `table` (via `<w:tblInd>`) by `indent_inches` - a no-op when `indent_inches <= 0`.
+
+    `python-docx`'s `Table` has no high-level `left_indent`/similar property
+    (unlike `Paragraph.paragraph_format`), so this sets the raw OOXML
+    `<w:tblInd>` element directly - the table equivalent of a paragraph's
+    left indent, same twips (1/20 pt) unit `_apply_block_indent` uses via
+    `Inches`.
+    """
+    if indent_inches <= 0:
+        return
+    tbl_ind = OxmlElement("w:tblInd")
+    tbl_ind.set(qn("w:w"), str(round(indent_inches * 1440)))
+    tbl_ind.set(qn("w:type"), "dxa")
+    table._tbl.tblPr.append(tbl_ind)
+
+
+def _render_matching(
+    subdoc, state: dict, widget: Widget, image_base_dir: Path | None,
+    block_indent_inches: float = 0,
+) -> None:
     """Render a `matching` widget as a 2-column table (statement | option).
 
     Left column: a blank + statement (`"_____ United States"`, blank docx —
@@ -1115,6 +1220,7 @@ def _render_matching(subdoc, state: dict, widget: Widget, image_base_dir: Path |
     rows = max(len(widget.statements), len(widget.match_options), 1)
     table = subdoc.add_table(rows=rows, cols=2)
     _style_two_column_table(table)
+    _apply_table_indent(table, block_indent_inches)
 
     for i in range(len(widget.statements)):
         paragraph = table.cell(i, 0).paragraphs[0]
@@ -1139,16 +1245,20 @@ def _render_matching(subdoc, state: dict, widget: Widget, image_base_dir: Path |
 
 
 def _render_order_blocks(
-    subdoc, state: dict, widget: Widget, prefs, image_base_dir: Path | None
+    subdoc, state: dict, widget: Widget, prefs, image_base_dir: Path | None,
+    block_indent_inches: float = 0,
 ) -> None:
     """Dispatch a `order_blocks` widget to its vertical/horizontal renderer, per `prefs.layout`."""
     if prefs.layout == "horizontal":
-        _render_order_blocks_horizontal(subdoc, state, widget, image_base_dir)
+        _render_order_blocks_horizontal(subdoc, state, widget, image_base_dir, block_indent_inches)
     else:
-        _render_order_blocks_vertical(subdoc, state, widget, image_base_dir)
+        _render_order_blocks_vertical(subdoc, state, widget, image_base_dir, block_indent_inches)
 
 
-def _render_order_blocks_vertical(subdoc, state: dict, widget: Widget, image_base_dir: Path | None) -> None:
+def _render_order_blocks_vertical(
+    subdoc, state: dict, widget: Widget, image_base_dir: Path | None,
+    block_indent_inches: float = 0,
+) -> None:
     """Render `pl-order-blocks` as a 2-column table (lettered pool block | order blank).
 
     Row 0 is a header row (blank left cell, `"Order:"` right cell, matching the
@@ -1167,6 +1277,7 @@ def _render_order_blocks_vertical(subdoc, state: dict, widget: Widget, image_bas
     rows = max(len(widget.blocks), n_blanks, 1) + 1
     table = subdoc.add_table(rows=rows, cols=2)
     _style_two_column_table(table)
+    _apply_table_indent(table, block_indent_inches)
     table.cell(0, 1).paragraphs[0].add_run("Order:")
 
     for i, block_nodes in enumerate(widget.blocks):
@@ -1188,17 +1299,23 @@ def _render_order_blocks_vertical(subdoc, state: dict, widget: Widget, image_bas
     state["paragraph"] = subdoc.add_paragraph()
 
 
-def _render_order_blocks_horizontal(subdoc, state: dict, widget: Widget, image_base_dir: Path | None) -> None:
+def _render_order_blocks_horizontal(
+    subdoc, state: dict, widget: Widget, image_base_dir: Path | None,
+    block_indent_inches: float = 0,
+) -> None:
     """Render `pl-order-blocks` inline: lettered blocks in one paragraph, blanks in the next.
 
     Same content/lettering as the vertical layout, just placed as runs in two
     paragraphs instead of table cells (`"A. 1   B. 2   C. 3   D. 4"` then
-    `"Order:  ____  ____  ____  ____"`), per the user's reference mockup.
+    `"Order:  ____  ____  ____  ____"`), per the user's reference mockup. Both
+    paragraphs get the block indent (not just the first) - both are this
+    widget's own content, same as the vertical layout's single table.
     """
     if state["paragraph"].runs:
         state["paragraph"] = subdoc.add_paragraph()
 
     pool_paragraph = subdoc.add_paragraph()
+    _apply_block_indent(pool_paragraph, block_indent_inches)
     for i, block_nodes in enumerate(widget.blocks):
         if i > 0:
             pool_paragraph.add_run("   ")
@@ -1208,6 +1325,7 @@ def _render_order_blocks_horizontal(subdoc, state: dict, widget: Widget, image_b
         _render_nodes_to_paragraph(pool_paragraph, block_nodes, image_base_dir)
 
     order_paragraph = subdoc.add_paragraph()
+    _apply_block_indent(order_paragraph, block_indent_inches)
     order_paragraph.add_run("Order: ")
     n_blanks = len(widget.correct_order) if widget.correct_order is not None else len(widget.blocks)
     correct_letters = (
