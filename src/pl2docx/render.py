@@ -2,12 +2,12 @@
 
 Usage
 -----
-    python -m pl2docx.render <instance_dir> [template_path]
+    python -m pl2docx.render <instance_dir> [template_path] [config_path]
 
 `instance_dir` is one `output/<assessment_instance_id>/` folder produced by
 `pl2docx.fetch`, containing `blank/*.html`, `key/*.html`, and `structure.json`.
-`template_path` defaults to `config.yaml`'s `template_path` if omitted (a
-`config.yaml` must exist in the current working directory in that case).
+`template_path` defaults to `config_path`'s `template_path` if omitted.
+`config_path` defaults to `"config.yaml"` in the current working directory.
 """
 
 from __future__ import annotations
@@ -175,24 +175,48 @@ def render_instance(
     return blank_path, key_path
 
 
+def load_render_settings(config_path: Path) -> tuple[bool, float]:
+    """Load config.yaml-derived document-formatting settings for rendering.
+
+    Parameters
+    ----------
+    config_path : pathlib.Path
+        Path to a pl2docx `config.yaml`. Need not exist — see Notes.
+
+    Returns
+    -------
+    tuple[bool, float]
+        `(restart_numbering_per_zone, block_display_indent_inches)`.
+
+    Notes
+    -----
+    `pl2docx-render` can render a single already-fetched instance without any
+    `config.yaml` present (e.g. ad hoc re-rendering with an explicit
+    `template_path`) — a missing `config_path` falls back to both settings'
+    built-in defaults rather than raising, matching this command's original
+    behavior. Also registers `config.yaml`'s `latex-packages` (see
+    `pl2docx.latex_math.configure_extra_packages`) as a side effect when the
+    file exists. Reused by `pl2docx.run` so both commands derive these
+    settings identically. Element-formatting preferences (`ElementConfig`)
+    are a separate concern, loaded independently via
+    `pl2docx.element_config.load_element_config`.
+    """
+    if not config_path.exists():
+        return False, DEFAULT_BLOCK_DISPLAY_INDENT_INCHES
+    run_config = load_config(config_path)
+    configure_extra_packages(run_config.latex_packages)
+    return run_config.restart_numbering_per_zone, run_config.block_display_indent_inches
+
+
 def main() -> None:
-    if len(sys.argv) not in (2, 3):
-        print("Usage: python -m pl2docx.render <instance_dir> [template_path]")
+    if len(sys.argv) not in (2, 3, 4):
+        print("Usage: python -m pl2docx.render <instance_dir> [template_path] [config_path]")
         sys.exit(1)
     instance_dir = Path(sys.argv[1])
-    if len(sys.argv) == 3:
-        template_path = Path(sys.argv[2])
-    else:
-        template_path = load_config("config.yaml").template_path
-    element_config = load_element_config("config.yaml")
-    config_path = Path("config.yaml")
-    restart_numbering_per_zone = False
-    block_display_indent_inches = DEFAULT_BLOCK_DISPLAY_INDENT_INCHES
-    if config_path.exists():
-        run_config = load_config(config_path)
-        configure_extra_packages(run_config.latex_packages)
-        restart_numbering_per_zone = run_config.restart_numbering_per_zone
-        block_display_indent_inches = run_config.block_display_indent_inches
+    config_path = Path(sys.argv[3]) if len(sys.argv) == 4 else Path("config.yaml")
+    template_path = Path(sys.argv[2]) if len(sys.argv) >= 3 else load_config(config_path).template_path
+    element_config = load_element_config(config_path)
+    restart_numbering_per_zone, block_display_indent_inches = load_render_settings(config_path)
     blank_path, key_path = render_instance(
         instance_dir, template_path, element_config, restart_numbering_per_zone, block_display_indent_inches
     )

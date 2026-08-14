@@ -346,21 +346,48 @@ Current structure:
 │   │                               #   `_build_question_contents` return paths (the normal one and
 │   │                               #   the zero-widget fast path) - not a template/Jinja issue, so
 │   │                               #   it lives in element_renderer.py, not here.
-│   └── render.py                  # CLI entry point (python -m pl2docx.render / `pl2docx-render`) -
-│                                   #   renders one fetch.py output/<instance>/ dir (using its
-│                                   #   structure.json for zone/question order) into blank+key docx;
-│                                   #   loads element_config.yaml's preferences via
-│                                   #   element_config.load_element_config() alongside config.py.
-│                                   #   _build_zones() reads structure.json's new dict shape
-│                                   #   ({"instance_id": ..., "zones": [...]}, falling back to the
-│                                   #   old bare-list shape/folder name for a pre-existing
-│                                   #   structure.json missing the field) and threads instance_id
-│                                   #   through to render_document(). restart_numbering_per_zone
-│                                   #   (config.yaml) resets _build_zones()'s question-number
-│                                   #   counter to 1 at the start of every zone instead of running
-│                                   #   continuously - the docstring note this used to carry ("a
-│                                   #   plausible future option, not implemented here") is now
-│                                   #   implemented.
+│   ├── render.py                  # CLI entry point (python -m pl2docx.render / `pl2docx-render`) -
+│   │                               #   renders one fetch.py output/<instance>/ dir (using its
+│   │                               #   structure.json for zone/question order) into blank+key docx;
+│   │                               #   loads element_config.yaml's preferences via
+│   │                               #   element_config.load_element_config() alongside config.py.
+│   │                               #   _build_zones() reads structure.json's new dict shape
+│   │                               #   ({"instance_id": ..., "zones": [...]}, falling back to the
+│   │                               #   old bare-list shape/folder name for a pre-existing
+│   │                               #   structure.json missing the field) and threads instance_id
+│   │                               #   through to render_document(). restart_numbering_per_zone
+│   │                               #   (config.yaml) resets _build_zones()'s question-number
+│   │                               #   counter to 1 at the start of every zone instead of running
+│   │                               #   continuously - the docstring note this used to carry ("a
+│   │                               #   plausible future option, not implemented here") is now
+│   │                               #   implemented. Phase 8: `main()` now accepts an optional
+│   │                               #   third `config_path` arg (was hardcoded to the literal
+│   │                               #   `"config.yaml"` in two places - a real inconsistency with
+│   │                               #   fetch.py's existing config-path override, fixed this
+│   │                               #   session); the config.yaml-derived settings load
+│   │                               #   (restart_numbering_per_zone/block_display_indent_inches,
+│   │                               #   plus registering latex-packages) is factored into
+│   │                               #   `load_render_settings()`, reused by run.py so both commands
+│   │                               #   derive them identically instead of duplicating the logic.
+│   └── run.py                     # Phase 8: CLI entry point (python -m pl2docx.run /
+│                                   #   `pl2docx-run`) - fetches AND renders every configured
+│                                   #   instance in one command, instead of running `pl2docx-fetch`
+│                                   #   then one `pl2docx-render` per instance folder by hand.
+│                                   #   `run_all()` calls `fetch.fetch_n_instances` and
+│                                   #   `render.render_instance` directly (no subprocess), reusing
+│                                   #   `fetch.instance_folder_label()` (also new this session,
+│                                   #   factored out of fetch.py's own instance-creation loop) to
+│                                   #   locate each fetched instance's output folder from
+│                                   #   `fetch_n_instances`'s returned numeric ids, rather than
+│                                   #   re-deriving the `instance_ids`-vs-numeric-id folder-naming
+│                                   #   branch a second time. All paths (`config_path` itself, plus
+│                                   #   `config.yaml`'s `output_dir`/`template_path`) resolve
+│                                   #   relative to the process CWD - confirmed no code anywhere in
+│                                   #   `src/` does `__file__`-relative path resolution, so this
+│                                   #   "just works" once the package is installed as a normal
+│                                   #   console-script entry point (e.g. `uv tool install .`) and
+│                                   #   run from whatever folder holds a given assessment's own
+│                                   #   `config.yaml`/`template.docx`.
 ├── tests/
 │   ├── conftest.py                          # starter_template fixture (generated at test time,
 │   │                                         #   via the real build_starter_template())
@@ -371,6 +398,12 @@ Current structure:
 │   ├── test_render.py                       # unit tests, no live server needed - _build_zones'
 │   │                                         #   per-zone-restart numbering, render_instance's
 │   │                                         #   instance_id threading/fallback
+│   ├── test_run.py                          # Phase 8: unit tests, no live server needed - stubs
+│   │                                         #   PLClient the same way test_fetch.py does;
+│   │                                         #   exercises run_all() end-to-end (fetch + render)
+│   │                                         #   against a real generated starter_template, for
+│   │                                         #   both default numeric-id and configured
+│   │                                         #   instance_ids folder naming
 │   ├── test_element_config.py               # unit tests, no live server needed
 │   ├── test_element_renderer.py             # unit tests, no live server needed; SVG-embedding cases
 │   │                                         #   split Chromium-independent (fallback-on-error paths,

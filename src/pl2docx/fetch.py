@@ -123,6 +123,32 @@ def _write_structure(
     )
 
 
+def instance_folder_label(config: Config, index: int, assessment_instance_id: int) -> str:
+    """The output folder name `fetch_n_instances` used for one generated instance.
+
+    Parameters
+    ----------
+    config : Config
+        The configuration `fetch_n_instances` was run with.
+    index : int
+        0-based position of this instance in generation order.
+    assessment_instance_id : int
+        The PL-assigned numeric id for this instance, as returned by
+        `fetch_n_instances` at the same position.
+
+    Returns
+    -------
+    str
+        `config.instance_ids[index]` when `instance_ids` is configured,
+        else `str(assessment_instance_id)` — mirrors the folder-naming
+        branch inside `fetch_n_instances`'s own loop exactly, so callers
+        (e.g. `pl2docx.run`) that only have `fetch_n_instances`'s return
+        value can locate each instance's output folder without
+        re-deriving this logic themselves.
+    """
+    return config.instance_ids[index] if config.instance_ids else str(assessment_instance_id)
+
+
 def fetch_n_instances(
     config: Config, interactive_tags: dict[str, InteractivePreferences] | None = None
 ) -> list[int]:
@@ -190,12 +216,11 @@ def fetch_n_instances(
     instance_ids: list[int] = []
     for i in range(total):
         assessment_instance_id = client.create_or_regenerate_instance(course_instance_id, assessment_id)
+        folder_label = instance_folder_label(config, i, assessment_instance_id)
         if config.instance_ids:
-            folder_label = config.instance_ids[i]
             display_instance_id = config.instance_ids[i]
             label_suffix = f" (instance_ID: {display_instance_id!r})"
         else:
-            folder_label = str(assessment_instance_id)
             display_instance_id = f"Instance {i + 1}"
             label_suffix = ""
         print(f"[{i + 1}/{total}] created assessment_instance {assessment_instance_id}{label_suffix}")
