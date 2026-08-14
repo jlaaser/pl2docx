@@ -31,19 +31,27 @@ def _load_question(
 
 
 def _build_zones(
-    html_dir: Path, structure: list[dict], element_config: ElementConfig | None
+    html_dir: Path,
+    zones_structure: list[dict],
+    element_config: ElementConfig | None,
+    restart_numbering_per_zone: bool = False,
 ) -> list[ZoneQuestions]:
-    """Pair each zone's questions with their document-wide 1-based number.
+    """Pair each zone's questions with their 1-based question number.
 
-    Numbering is continuous across the whole document (not restarted per
-    zone) — matching PL's own numbering convention seen in fetched content,
-    and the simplest behavior consistent with this phase's scope. Per-zone
-    restart is a plausible future config option, not implemented here.
+    Parameters
+    ----------
+    restart_numbering_per_zone : bool
+        Whether numbering resets to 1 at the start of every zone. `False`
+        (the default) numbers continuously across the whole document,
+        matching PL's own numbering convention and this project's original
+        behavior.
     """
     extra_fill_in_tags = additional_fill_in_tags(element_config) if element_config else []
     zones: list[ZoneQuestions] = []
     number = 1
-    for zone in structure:
+    for zone in zones_structure:
+        if restart_numbering_per_zone:
+            number = 1
         questions: list[tuple[ParsedQuestion, int]] = []
         for iq_id in zone["instance_question_ids"]:
             questions.append((_load_question(html_dir, iq_id, extra_fill_in_tags), number))
@@ -53,7 +61,10 @@ def _build_zones(
 
 
 def render_instance(
-    instance_dir: Path, template_path: Path, element_config: ElementConfig | None = None
+    instance_dir: Path,
+    template_path: Path,
+    element_config: ElementConfig | None = None,
+    restart_numbering_per_zone: bool = False,
 ) -> tuple[Path, Path]:
     """Render an instance's fetched HTML into blank + key docx files.
 
@@ -62,8 +73,10 @@ def render_instance(
     instance_dir : pathlib.Path
         A directory produced by `pl2docx.fetch`, containing `blank/`, `key/`
         subfolders of `instance_question` HTML files named
-        `<instance_question_id>.html`, and a `structure.json` (zone titles +
-        question order/ids).
+        `<instance_question_id>.html`, and a `structure.json`
+        (`{"instance_id": ..., "zones": [...]}` — zone titles, question
+        order/ids, and the `instance_ID` template value; see
+        `pl2docx.fetch._write_structure`).
     template_path : pathlib.Path
         Docx template — see `pl2docx.docx_builder.render_document` for the
         context shape it must consume, and `pl2docx.starter_template` for a
@@ -71,6 +84,8 @@ def render_instance(
     element_config : pl2docx.element_config.ElementConfig or None
         Instructor-configured element/question-level formatting preferences.
         `None` (the default) applies built-in defaults for every widget kind.
+    restart_numbering_per_zone : bool
+        Passed straight through to `_build_zones` — see its docstring.
 
     Returns
     -------
@@ -79,6 +94,15 @@ def render_instance(
         the source HTML inside `instance_dir`.
     """
     structure = json.loads((instance_dir / "structure.json").read_text(encoding="utf-8"))
+    # Graceful fallback for a structure.json written before this field existed
+    # (a schema change to a gitignored, regenerable runtime file — re-fetching
+    # is the real fix, this just avoids a hard crash on stale output/).
+    if isinstance(structure, dict):
+        instance_id_display = structure.get("instance_id") or instance_dir.name
+        zones_structure = structure["zones"]
+    else:
+        instance_id_display = instance_dir.name
+        zones_structure = structure
 
     instance_id = instance_dir.name
     blank_path = instance_dir / f"{instance_id}_blank.docx"
@@ -86,19 +110,21 @@ def render_instance(
 
     render_document(
         template_path,
-        _build_zones(instance_dir / "blank", structure, element_config),
+        _build_zones(instance_dir / "blank", zones_structure, element_config, restart_numbering_per_zone),
         is_answer_key=False,
         output_path=blank_path,
         element_config=element_config,
         image_base_dir=instance_dir / "blank",
+        instance_id=instance_id_display,
     )
     render_document(
         template_path,
-        _build_zones(instance_dir / "key", structure, element_config),
+        _build_zones(instance_dir / "key", zones_structure, element_config, restart_numbering_per_zone),
         is_answer_key=True,
         output_path=key_path,
         element_config=element_config,
         image_base_dir=instance_dir / "key",
+        instance_id=instance_id_display,
     )
     return blank_path, key_path
 
@@ -114,9 +140,14 @@ def main() -> None:
         template_path = load_config("config.yaml").template_path
     element_config = load_element_config("config.yaml")
     config_path = Path("config.yaml")
+    restart_numbering_per_zone = False
     if config_path.exists():
-        configure_extra_packages(load_config(config_path).latex_packages)
-    blank_path, key_path = render_instance(instance_dir, template_path, element_config)
+        run_config = load_config(config_path)
+        configure_extra_packages(run_config.latex_packages)
+        restart_numbering_per_zone = run_config.restart_numbering_per_zone
+    blank_path, key_path = render_instance(
+        instance_dir, template_path, element_config, restart_numbering_per_zone
+    )
     print(f"Wrote {blank_path}")
     print(f"Wrote {key_path}")
 

@@ -68,7 +68,9 @@ def test_fetch_n_instances_produces_distinct_paired_html(tmp_path):
 
         structure_path = instance_dir / "structure.json"
         assert structure_path.is_file()
-        zones = json.loads(structure_path.read_text(encoding="utf-8"))
+        structure = json.loads(structure_path.read_text(encoding="utf-8"))
+        assert structure["instance_id"] == f"Instance {instance_ids.index(instance_id) + 1}"
+        zones = structure["zones"]
         assert zones, "expected at least one zone"
         all_ids_from_structure = {
             str(iq_id) for zone in zones for iq_id in zone["instance_question_ids"]

@@ -394,7 +394,7 @@ def build_question_context(
         "points_text": format_points_text(question.points_numeric, question.points),
         "question_contents": question_contents,
         "answer_contents": _build_answer_contents(tpl, question, image_base_dir, list_formats),
-        "answer_space": _build_answer_space(tpl),
+        "answer_space": _build_answer_space(tpl, _resolve_answer_space_lines(question, element_config)),
         "answer_element": answer_element,
         "has_answer_element": has_answer_element,
     }
@@ -1030,8 +1030,27 @@ def _build_answer_contents(
     return subdoc
 
 
-def _build_answer_space(tpl: DocxTemplate):
+def _build_answer_space(tpl: DocxTemplate, blank_lines: int = ANSWER_SPACE_BLANK_LINES):
     subdoc = tpl.new_subdoc()
-    for _ in range(ANSWER_SPACE_BLANK_LINES):
+    for _ in range(blank_lines):
         subdoc.add_paragraph("")
     return subdoc
+
+
+def _resolve_answer_space_lines(question: ParsedQuestion, element_config: ElementConfig) -> int:
+    """Resolve how many blank lines `question`'s answer_space should give students.
+
+    Per-kind override via `SelectorPreferences`/`FillInPreferences.blank_answer_lines`
+    (see their docstrings) - a compound question with multiple widgets of different
+    kinds, each configuring a different value, uses the *largest* one (confirmed
+    with the user: "the max value across all widgets on the question" - a question
+    needs room for whichever of its parts needs the most space, not the least).
+    Falls back to `ANSWER_SPACE_BLANK_LINES` when the question has no widgets at all,
+    or none of its widgets' kinds configure this preference.
+    """
+    configured = [
+        prefs.blank_answer_lines
+        for widget in question.widgets
+        if (prefs := resolve_preferences(element_config, widget.kind)).blank_answer_lines is not None
+    ]
+    return max(configured) if configured else ANSWER_SPACE_BLANK_LINES

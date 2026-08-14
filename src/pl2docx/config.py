@@ -36,7 +36,22 @@ class Config:
         reason as `course_short_name`. Deliberately not matched by title,
         which is editable independent of `tid`.
     n_instances : int
-        Number of instances to generate when running the fetch script.
+        Number of instances to generate when running the fetch script. Ignored when
+        `instance_ids` is set (non-empty) — see that field.
+    instance_ids : list[str] or None
+        Explicit instance identifiers, one instance generated per string, in order.
+        When set (non-empty), this replaces `n_instances` entirely as the source of
+        how many instances to generate. Each string becomes the output folder name
+        (`output_dir/<instance_id>/...`, instead of the PL-assigned numeric
+        `assessment_instance_id`) and the value of the `instance_ID` template
+        variable exposed to the docx template (see `pl2docx.fetch`/
+        `pl2docx.docx_builder.render_document`) — PL itself still mints its own
+        numeric instance id under the hood regardless; this is a purely
+        pl2docx-side label with no PL-side meaning. `None`/empty (the default)
+        falls back to `n_instances` numbered instances, with output folders named
+        by PL's numeric id (unchanged from before this field existed) and each
+        instance's `instance_ID` template variable defaulting to `"Instance
+        {n}"` (1-based).
     output_dir : pathlib.Path
         Directory under which fetched HTML for each instance is saved.
     template_path : pathlib.Path
@@ -58,6 +73,11 @@ class Config:
         every math snippet still renders, just without whatever notation the
         missing package would have provided (e.g. mhchem's `\\ce{}` chemistry
         formulas fall back to placeholder text without `mhchem` declared here).
+    restart_numbering_per_zone : bool
+        Whether question numbering (`question.number` in the template context)
+        restarts at 1 at the beginning of every zone, instead of running
+        continuously across the whole document. `False` (the default) matches
+        PL's own numbering convention and this project's original behavior.
 
     Notes
     -----
@@ -74,6 +94,8 @@ class Config:
     output_dir: Path
     template_path: Path
     latex_packages: list[str] = field(default_factory=list)
+    instance_ids: list[str] | None = None
+    restart_numbering_per_zone: bool = False
 
 
 def load_config(path: str | Path) -> Config:
@@ -119,4 +141,6 @@ def load_config(path: str | Path) -> Config:
         output_dir=Path(raw.get("output_dir", "output")),
         template_path=Path(raw.get("template_path", "template.docx")),
         latex_packages=[str(pkg) for pkg in (raw.get("latex-packages") or [])],
+        instance_ids=[str(i) for i in raw["instance_ids"]] if raw.get("instance_ids") else None,
+        restart_numbering_per_zone=bool(raw.get("restart_numbering_per_zone", False)),
     )

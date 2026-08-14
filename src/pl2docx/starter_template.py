@@ -27,6 +27,13 @@ anywhere by default. The only exceptions are the assessment title/zone heading
 `_add_bordered_solution_box`) — deliberately not a general-purpose "make it
 pretty" theme, just this one specific, plain, print-friendly look.
 
+**`{{ instance_ID }}`**: a top-level Jinja variable (see
+`pl2docx.docx_builder.render_document`'s `instance_id` parameter) identifying
+which generated instance this render is — either an explicit
+`Config.instance_ids` entry, or a default `"Instance {n}"` label. Placed right
+under the title here (matching the reference example's "Midterm 1 - Version
+A" pattern) purely as a visible default; move, restyle, or delete it freely.
+
 **`{%p %}` control-flow tags, not plain `{% %}` or whitespace-trim**: every
 `for`/`if`/`else`/`endif`/`endfor` control-tag paragraph below uses docxtpl's
 `{%p ... %}` prefix (the same paragraph-consuming mechanism `{{p ... }}` uses
@@ -98,6 +105,7 @@ def build_starter_template(output_path: Path = DEFAULT_OUTPUT_PATH) -> None:
     _define_styles(doc)
 
     doc.add_paragraph("Assessment Title", style="pl2docx Assessment Title")
+    doc.add_paragraph("{{ instance_ID }}", style="pl2docx Assessment Title")
     doc.add_paragraph(
         "Instructions: replace this paragraph (and the title above) with your "
         "own instructions/reference material. Everything outside the loop tags "

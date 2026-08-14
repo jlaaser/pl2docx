@@ -334,6 +334,82 @@ def test_has_answer_element_false_when_no_widget_uses_template_display(starter_t
     assert ctx["has_answer_element"] is False
 
 
+def _answer_space_line_count(subdoc) -> int:
+    return len(subdoc.paragraphs)
+
+
+def test_answer_space_defaults_to_two_blank_lines(starter_template):
+    tpl = _tpl(starter_template)
+    element_config = ElementConfig(preferences={}, behavior_class={})
+    ctx = build_question_context(tpl, _string_question(), 1, element_config)
+    assert _answer_space_line_count(ctx["answer_space"]) == 2
+
+
+def test_answer_space_uses_configured_blank_answer_lines(starter_template):
+    tpl = _tpl(starter_template)
+    element_config = ElementConfig(
+        preferences={"string_input": FillInPreferences(blank_answer_lines=10)},
+        behavior_class={},
+    )
+    ctx = build_question_context(tpl, _string_question(), 1, element_config)
+    assert _answer_space_line_count(ctx["answer_space"]) == 10
+
+
+def test_answer_space_zero_blank_answer_lines_gives_no_lines(starter_template):
+    """0 is a real, distinct configured value from "unconfigured" (None) - e.g. a
+    multiple_choice question needs no extra work space by default."""
+    tpl = _tpl(starter_template)
+    element_config = ElementConfig(
+        preferences={"multiple_choice": SelectorPreferences(blank_answer_lines=0)},
+        behavior_class={},
+    )
+    ctx = build_question_context(tpl, _mc_question(), 1, element_config)
+    assert _answer_space_line_count(ctx["answer_space"]) == 0
+
+
+def test_answer_space_no_widgets_falls_back_to_default(starter_template):
+    tpl = _tpl(starter_template)
+    element_config = ElementConfig(preferences={}, behavior_class={})
+    question = ParsedQuestion(
+        title="Diagram only",
+        prompt_segments=[plain("A diagram, no widgets.")],
+        widgets=[],
+        answer_panel_text=None,
+        points="1",
+        points_numeric=1.0,
+        qid="q/diagram",
+    )
+    ctx = build_question_context(tpl, question, 1, element_config)
+    assert _answer_space_line_count(ctx["answer_space"]) == 2
+
+
+def test_answer_space_compound_question_uses_max_across_widget_kinds(starter_template):
+    """Confirmed with the user: a compound question with multiple widget kinds,
+    each configuring a different blank_answer_lines, uses the *largest* value -
+    a question needs room for whichever of its parts needs the most space."""
+    tpl = _tpl(starter_template)
+    mc_widget = Widget(kind="multiple_choice", name="mc", options=[plain("A"), plain("B")])
+    string_widget = Widget(kind="string_input", name="answer")
+    question = ParsedQuestion(
+        title="Compound",
+        prompt_segments=[plain("Part A:"), plain("Part B:"), plain("")],
+        widgets=[mc_widget, string_widget],
+        answer_panel_text=None,
+        points="2",
+        points_numeric=2.0,
+        qid="q/compound",
+    )
+    element_config = ElementConfig(
+        preferences={
+            "multiple_choice": SelectorPreferences(blank_answer_lines=1),
+            "string_input": FillInPreferences(blank_answer_lines=10),
+        },
+        behavior_class={},
+    )
+    ctx = build_question_context(tpl, question, 1, element_config)
+    assert _answer_space_line_count(ctx["answer_space"]) == 10
+
+
 def test_fill_in_none_display_generated_then_discarded(starter_template):
     tpl = _tpl(starter_template)
     element_config = ElementConfig(

@@ -81,6 +81,17 @@ def test_render_document_blank(starter_template, tmp_path):
     assert "42" not in text
 
 
+def test_render_document_threads_instance_id_into_template(starter_template, tmp_path):
+    output_path = tmp_path / "blank.docx"
+    zones = _zones(blank=True)
+    render_document(
+        starter_template, [zones[0]], is_answer_key=False, output_path=output_path,
+        instance_id="Version A",
+    )
+
+    assert "Version A" in _all_text(output_path)
+
+
 def test_render_document_key(starter_template, tmp_path):
     output_path = tmp_path / "key.docx"
     zones = _zones(blank=False)

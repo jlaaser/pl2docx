@@ -78,12 +78,12 @@ def _write_html(
     client: PLClient,
     output_dir: Path,
     course_instance_id: int,
-    assessment_instance_id: int,
+    folder_label: str,
     subdir: str,
     pages: dict[int, str],
     interactive_tags: dict[str, InteractivePreferences],
 ) -> None:
-    instance_dir = output_dir / str(assessment_instance_id) / subdir
+    instance_dir = output_dir / folder_label / subdir
     instance_dir.mkdir(parents=True, exist_ok=True)
     files_dir = instance_dir / "files"
     for instance_question_id, html in pages.items():
@@ -96,24 +96,47 @@ def _write_html(
         (instance_dir / f"{instance_question_id}.html").write_text(html, encoding="utf-8")
 
 
-def _write_structure(output_dir: Path, assessment_instance_id: int, zones: list[ZoneGroup]) -> None:
-    instance_dir = output_dir / str(assessment_instance_id)
+def _write_structure(
+    output_dir: Path, folder_label: str, instance_id: str, zones: list[ZoneGroup]
+) -> None:
+    """Write `structure.json`: `{"instance_id": ..., "zones": [...]}`.
+
+    Parameters
+    ----------
+    folder_label : str
+        The instance's output folder name (see `fetch_n_instances` — either a
+        configured `Config.instance_ids` entry, or the PL-assigned numeric
+        `assessment_instance_id` as a string).
+    instance_id : str
+        The value exposed to the docx template as `instance_ID` (see
+        `pl2docx.docx_builder.render_document`) — an explicit
+        `Config.instance_ids` entry when configured, else `"Instance {n}"`
+        (1-based). Distinct from `folder_label`: when `instance_ids` isn't
+        configured, the folder is still named by PL's numeric id, but this
+        display value is the friendlier `"Instance {n}"` text.
+    """
+    instance_dir = output_dir / folder_label
     instance_dir.mkdir(parents=True, exist_ok=True)
     (instance_dir / "structure.json").write_text(
-        json.dumps([asdict(zone) for zone in zones], indent=2), encoding="utf-8"
+        json.dumps({"instance_id": instance_id, "zones": [asdict(zone) for zone in zones]}, indent=2),
+        encoding="utf-8",
     )
 
 
 def fetch_n_instances(
     config: Config, interactive_tags: dict[str, InteractivePreferences] | None = None
 ) -> list[int]:
-    """Generate `config.n_instances` distinct instances and fetch blank + key HTML.
+    """Generate distinct instances and fetch blank + key HTML for each.
 
     Parameters
     ----------
     config : Config
         Runtime configuration identifying the target server, course
-        instance, and assessment.
+        instance, and assessment. `config.instance_ids` (when set/non-empty)
+        determines how many instances to generate and what each is called;
+        `config.n_instances` is used only when `instance_ids` isn't set - see
+        `Config`'s own docstring for the full folder-naming/`instance_ID`
+        distinction between the two modes.
     interactive_tags : dict[str, InteractivePreferences] or None
         Canvas-based interactive elements to screenshot and flatten to plain
         images at fetch time (Phase 5 subphase 2) - typically
@@ -124,8 +147,11 @@ def fetch_n_instances(
     Returns
     -------
     list[int]
-        The `assessment_instance_id` of each generated instance, in
-        generation order.
+        The PL-assigned `assessment_instance_id` of each generated instance,
+        in generation order - always the real numeric id PL minted, even
+        when `config.instance_ids` gives instances their own local labels
+        (see `Config.instance_ids`'s docstring: PL always assigns its own
+        numeric id under the hood regardless of local naming).
 
     Notes
     -----
@@ -148,8 +174,9 @@ def fetch_n_instances(
     Also saves, per instance: any same-origin images referenced in the
     fetched HTML (under `<instance>/{blank,key}/files/`, with the HTML's
     `<img src>` rewritten to match), and the assessment's zone/question
-    structure (`<instance>/structure.json`) — both captured now so later
-    rendering work doesn't need a live server or a second fetch.
+    structure plus its `instance_ID` display value (`<instance>/structure.json`
+    — see `_write_structure`) — both captured now so later rendering work
+    doesn't need a live server or a second fetch.
     """
     client = PLClient(config.base_url)
     interactive_tags = interactive_tags or {}
@@ -158,25 +185,35 @@ def fetch_n_instances(
     course_instance_id = client.resolve_course_instance_id(course_id, config.course_instance_short_name)
     assessment_id = client.resolve_assessment_id(course_instance_id, config.assessment_tid)
 
+    total = len(config.instance_ids) if config.instance_ids else config.n_instances
+
     instance_ids: list[int] = []
-    for i in range(config.n_instances):
+    for i in range(total):
         assessment_instance_id = client.create_or_regenerate_instance(course_instance_id, assessment_id)
-        print(f"[{i + 1}/{config.n_instances}] created assessment_instance {assessment_instance_id}")
+        if config.instance_ids:
+            folder_label = config.instance_ids[i]
+            display_instance_id = config.instance_ids[i]
+            label_suffix = f" (instance_ID: {display_instance_id!r})"
+        else:
+            folder_label = str(assessment_instance_id)
+            display_instance_id = f"Instance {i + 1}"
+            label_suffix = ""
+        print(f"[{i + 1}/{total}] created assessment_instance {assessment_instance_id}{label_suffix}")
 
         zones = client.list_instance_questions(course_instance_id, assessment_instance_id)
-        _write_structure(config.output_dir, assessment_instance_id, zones)
+        _write_structure(config.output_dir, folder_label, display_instance_id, zones)
         instance_question_ids = [iq_id for zone in zones for iq_id in zone.instance_question_ids]
 
         blank_html = client.fetch_instance_questions(course_instance_id, instance_question_ids)
         _write_html(
-            client, config.output_dir, course_instance_id, assessment_instance_id, "blank",
+            client, config.output_dir, course_instance_id, folder_label, "blank",
             blank_html, interactive_tags,
         )
 
         client.close_instance(course_instance_id, assessment_instance_id)
         key_html = client.fetch_instance_questions(course_instance_id, instance_question_ids)
         _write_html(
-            client, config.output_dir, course_instance_id, assessment_instance_id, "key",
+            client, config.output_dir, course_instance_id, folder_label, "key",
             key_html, interactive_tags,
         )
 

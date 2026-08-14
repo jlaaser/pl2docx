@@ -73,6 +73,53 @@ global-element-preferences:
     assert prefs.bold_correct is False
 
 
+def test_override_without_list_style_preserves_blank_answer_lines(tmp_path):
+    """Regression: resolve_preferences' list_style-default reconstruction (the
+    same code path test_override_without_list_style_still_gets_element_default
+    exercises) explicitly re-lists each SelectorPreferences field - a new field
+    added there without also adding it to that reconstruction would silently
+    reset to its dataclass default instead of the instructor's configured value."""
+    path = _write(
+        tmp_path,
+        """
+global-element-preferences:
+  pl-checkbox:
+    blank-answer-lines: 5
+""",
+    )
+    config = load_element_config(path)
+    prefs = resolve_preferences(config, "checkbox")
+    assert prefs.list_style == "checkbox"
+    assert prefs.blank_answer_lines == 5
+
+
+def test_blank_answer_lines_parsed_for_selector_and_fill_in(tmp_path):
+    path = _write(
+        tmp_path,
+        """
+global-element-preferences:
+  pl-multiple-choice:
+    blank-answer-lines: 0
+  pl-string-input:
+    blank-answer-lines: 10
+""",
+    )
+    config = load_element_config(path)
+
+    mc_prefs = resolve_preferences(config, "multiple_choice")
+    assert mc_prefs.blank_answer_lines == 0
+
+    string_prefs = resolve_preferences(config, "string_input")
+    assert string_prefs.blank_answer_lines == 10
+
+
+def test_blank_answer_lines_defaults_to_none(tmp_path):
+    path = _write(tmp_path, "base_url: 'http://localhost:3000'\n")
+    config = load_element_config(path)
+    assert resolve_preferences(config, "multiple_choice").blank_answer_lines is None
+    assert resolve_preferences(config, "string_input").blank_answer_lines is None
+
+
 def test_additional_elements_extends_behavior_class(tmp_path):
     path = _write(
         tmp_path,

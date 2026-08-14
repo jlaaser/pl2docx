@@ -78,12 +78,20 @@ class SelectorPreferences:
     draw_border : bool
         Whether to draw a single box around this widget's entire rendered content
         (all options together).
+    blank_answer_lines : int or None
+        Number of blank lines to give students in the blank copy's answer_space
+        (see `pl2docx.element_renderer._build_answer_space`) for a question using
+        this widget kind. `None` (the default) means "use the built-in default"
+        (`pl2docx.element_renderer.ANSWER_SPACE_BLANK_LINES`). A compound question
+        with multiple widgets of different kinds uses the *largest* configured
+        value across all of them (see `build_question_context`'s resolution logic).
     """
 
     list_style: ListStyle | None = None
     bold_correct: bool = True
     display: Display | None = None
     draw_border: bool = False
+    blank_answer_lines: int | None = None
 
 
 @dataclass(frozen=True)
@@ -108,11 +116,14 @@ class FillInPreferences:
         explicitly per element kind via `config.yaml`, since a default the instructor
         can't turn off isn't a real default. Never applied when the widget already has
         its own `label`, regardless of this setting.
+    blank_answer_lines : int or None
+        Same meaning as `SelectorPreferences.blank_answer_lines` — see there.
     """
 
     display: Display | None = None
     draw_border: bool = False
     default_label: str | None = None
+    blank_answer_lines: int | None = None
 
 
 ElementPreferences = SelectorPreferences | FillInPreferences
@@ -300,6 +311,7 @@ def resolve_preferences(element_config: ElementConfig, kind: str) -> ElementPref
                 bold_correct=prefs.bold_correct,
                 display=prefs.display,
                 draw_border=prefs.draw_border,
+                blank_answer_lines=prefs.blank_answer_lines,
             )
         return prefs
 

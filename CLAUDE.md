@@ -124,7 +124,19 @@ Current structure:
 │   ├── fetch.py                   # CLI entry point (python -m pl2docx.fetch / `pl2docx-fetch`) -
 │   │                               #   also downloads same-origin <img>s into files/ next to each
 │   │                               #   instance_question's HTML, rewriting src to the local path,
-│   │                               #   and writes structure.json (zone titles + question order/ids).
+│   │                               #   and writes structure.json: {"instance_id": ..., "zones": [...]}
+│   │                               #   (zone titles + question order/ids, plus the instance_ID
+│   │                               #   template value - schema change from the original bare-list
+│   │                               #   shape, gitignored/regenerable so no migration needed).
+│   │                               #   config.yaml's instance_ids (list[str] | None), when set,
+│   │                               #   replaces n_instances entirely: one instance generated per
+│   │                               #   string, each becoming both the output folder name (instead
+│   │                               #   of PL's numeric assessment_instance_id) and the recorded
+│   │                               #   instance_id display value - PL always mints its own numeric
+│   │                               #   id under the hood regardless, this is a purely pl2docx-side
+│   │                               #   label (see Config.instance_ids' docstring). Unset (default):
+│   │                               #   folders still named by PL's numeric id, display value
+│   │                               #   defaults to "Instance {n}" (1-based).
 │   │                               #   Phase 5 subphase 2: when config.yaml declares any
 │   │                               #   additional-elements type: interactive entries, also calls
 │   │                               #   canvas_capture.capture_interactive_elements() per
@@ -183,6 +195,15 @@ Current structure:
 │   │                               #   interactive-typed tag is consumed by fetch.py/
 │   │                               #   canvas_capture.py at fetch time and never becomes a Widget
 │   │                               #   needing a render-time preference at all.
+│   │                               #   blank_answer_lines (int | None) lives on BOTH
+│   │                               #   SelectorPreferences/FillInPreferences (settable via any
+│   │                               #   element kind, core or additional-elements) - resolve_preferences()'s
+│   │                               #   list_style-default reconstruction explicitly re-lists every
+│   │                               #   SelectorPreferences field, so a new field there always needs
+│   │                               #   adding to that reconstruction too, or it silently resets to
+│   │                               #   its dataclass default (confirmed real bug, fixed same session
+│   │                               #   this field was added - see test_element_config.py's
+│   │                               #   test_override_without_list_style_preserves_blank_answer_lines).
 │   ├── latex_math.py              # Phase 4 increment 3: render_math_png() - compiles raw LaTeX
 │   │                               #   (MathRef.latex) to a depth-annotated, print-resolution PNG
 │   │                               #   via a real latex + dvipng subprocess pipeline (not pdflatex +
@@ -244,6 +265,14 @@ Current structure:
 │   ├── element_renderer.py        # build_question_context() - one ParsedQuestion + ElementConfig ->
 │   │                               #   the 4 Subdocs (question_contents/answer_contents/answer_space/
 │   │                               #   answer_element) + qid/points a question's Jinja context needs.
+│   │                               #   _build_answer_space()'s blank-line count is resolved by
+│   │                               #   _resolve_answer_space_lines() from element_config.yaml's
+│   │                               #   blank_answer_lines (falls back to the fixed
+│   │                               #   ANSWER_SPACE_BLANK_LINES=2 when unconfigured or the question
+│   │                               #   has no widgets); a compound question with multiple widget
+│   │                               #   kinds uses the *largest* configured value across them
+│   │                               #   (confirmed with the user: a question needs room for whichever
+│   │                               #   part needs the most space, not the least).
 │   │                               #   Phase 3B: widgets render at their real source position
 │   │                               #   (interleaved with prompt_segments, not appended after);
 │   │                               #   config-driven list-style/bold-correct/display/draw-border per
@@ -263,7 +292,9 @@ Current structure:
 │   │                               #   itself (see element_renderer.py) - document *layout* lives in
 │   │                               #   the instructor's template (loop tags + named styles), not here.
 │   │                               #   Takes an optional ElementConfig, threaded to
-│   │                               #   build_question_context per question.
+│   │                               #   build_question_context per question. Also takes an optional
+│   │                               #   instance_id str, exposed to the template as the top-level
+│   │                               #   instance_ID Jinja variable (see Config.instance_ids/render.py).
 │   ├── starter_template.py        # build_starter_template() - CLI (`pl2docx-starter-template`)
 │   │                               #   generates an editable example instructor template (zones/
 │   │                               #   questions loop + named "pl2docx ..." styles + an
@@ -314,7 +345,17 @@ Current structure:
 │                                   #   renders one fetch.py output/<instance>/ dir (using its
 │                                   #   structure.json for zone/question order) into blank+key docx;
 │                                   #   loads element_config.yaml's preferences via
-│                                   #   element_config.load_element_config() alongside config.py
+│                                   #   element_config.load_element_config() alongside config.py.
+│                                   #   _build_zones() reads structure.json's new dict shape
+│                                   #   ({"instance_id": ..., "zones": [...]}, falling back to the
+│                                   #   old bare-list shape/folder name for a pre-existing
+│                                   #   structure.json missing the field) and threads instance_id
+│                                   #   through to render_document(). restart_numbering_per_zone
+│                                   #   (config.yaml) resets _build_zones()'s question-number
+│                                   #   counter to 1 at the start of every zone instead of running
+│                                   #   continuously - the docstring note this used to carry ("a
+│                                   #   plausible future option, not implemented here") is now
+│                                   #   implemented.
 ├── tests/
 │   ├── conftest.py                          # starter_template fixture (generated at test time,
 │   │                                         #   via the real build_starter_template())
@@ -322,6 +363,9 @@ Current structure:
 │   │                                         #   one blank+key pair per Phase 2 element kind
 │   ├── test_csrf.py                         # unit tests, no live server needed
 │   ├── test_html_parser.py                  # unit tests, no live server needed
+│   ├── test_render.py                       # unit tests, no live server needed - _build_zones'
+│   │                                         #   per-zone-restart numbering, render_instance's
+│   │                                         #   instance_id threading/fallback
 │   ├── test_element_config.py               # unit tests, no live server needed
 │   ├── test_element_renderer.py             # unit tests, no live server needed; SVG-embedding cases
 │   │                                         #   split Chromium-independent (fallback-on-error paths,

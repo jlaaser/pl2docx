@@ -24,16 +24,36 @@ course_instance_short_name: null
 assessment_tid: null
 
 # Number of distinct instances to generate when running the fetch script.
+# Ignored when instance_ids (below) is set.
 n_instances: 3
 
+# Optional: explicit instance labels, one instance generated per string, in this
+# order - replaces n_instances entirely when set (non-empty). Each label becomes
+# the output folder name (output_dir/<label>/... instead of PL's numeric
+# assessment_instance_id) and the value of the instance_ID variable exposed to the
+# docx template (see template_path below) - PL still assigns its own numeric
+# instance id under the hood regardless of what you call it here. When omitted,
+# folders are still named by PL's numeric id, and instance_ID defaults to
+# "Instance 1", "Instance 2", etc.
+#
+# instance_ids:
+#   - "Version A"
+#   - "Version B"
+
 # Directory (relative to the repo root, unless absolute) where fetched
-# blank/key HTML is saved, one subfolder per assessment_instance_id.
+# blank/key HTML is saved, one subfolder per instance (see instance_ids above).
 output_dir: "output"
 
 # Path to the instructor-supplied docx template used when rendering. Generate a
 # starting point with `pl2docx-starter-template` (python -m pl2docx.starter_template),
-# then customize its styles/layout in Word.
+# then customize its styles/layout in Word. The starter template exposes an
+# {{ instance_ID }} variable (see instance_ids above) right under the title.
 template_path: "template.docx"
+
+# Whether question numbering (1., 2., 3., ...) restarts at 1 at the beginning of
+# every zone, instead of running continuously across the whole document (the
+# default).
+restart_numbering_per_zone: false
 
 # Phase 3B: per-element formatting preferences (all keys optional; omitting this
 # section entirely applies built-in defaults for every widget kind). See
@@ -47,21 +67,29 @@ template_path: "template.docx"
 #     bold-correct: true        # bold the correct option in the answer key
 #     display: null              # inline | block | template | none | (auto-detect)
 #     draw-border: false        # box the whole widget (all options together)
+#     blank-answer-lines: 0      # blank lines in the blank copy's answer space for a
+#                                 # question using this widget kind - null (default)
+#                                 # means "use the built-in default" (2 lines). A
+#                                 # question with multiple widget kinds uses the
+#                                 # largest configured value across all of them.
 #   pl-checkbox:
 #     list-style: checkbox      # letter-labels | bubble | checkbox (default)
 #     bold-correct: true
 #     display: null
 #     draw-border: false
+#     blank-answer-lines: null
 #   pl-string-input:
 #     display: null              # inline | block (default when undetectable) | template | none
 #     draw-border: false
 #     default-label: null        # fallback label text (e.g. "Answer:") used only when the
 #                                 # element's own source HTML has no label of its own - no
 #                                 # prefix at all by default (must opt in per element kind)
+#     blank-answer-lines: null
 #   pl-integer-input:
 #     display: null
 #     draw-border: false
 #     default-label: null
+#     blank-answer-lines: null
 #
 # additional-elements: elements not built into pl2docx (typically course-specific,
 # e.g. this one lives only in the chem 0110 course repo) that still follow the same
@@ -72,6 +100,8 @@ template_path: "template.docx"
 #     type: fill-in              # selector | fill-in - which built-in behavior set to extend
 #     display: null
 #     draw-border: false
+#     blank-answer-lines: 10     # e.g. give students 10 blank lines of work space for
+#                                 # this element kind specifically
 #
 # type: interactive is a third option (Phase 5 subphase 2), for canvas-based widgets a
 # student draws on directly (fabric.js elements like pl-orbitaldiagram/

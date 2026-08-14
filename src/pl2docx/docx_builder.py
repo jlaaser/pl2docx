@@ -47,6 +47,7 @@ def render_document(
     output_path: Path,
     element_config: ElementConfig | None = None,
     image_base_dir: Path | None = None,
+    instance_id: str | None = None,
 ) -> None:
     """Render `zones` into a docx built from `template_path`.
 
@@ -86,6 +87,13 @@ def render_document(
         `ImageRef.local_path` values are relative to (see that function's
         docs). `None` (the default) skips real image embedding, falling back
         to alt text.
+    instance_id : str or None
+        Exposed to the template as a top-level `instance_ID` variable —
+        either an explicit `Config.instance_ids` entry, or a default
+        `"Instance {n}"` label, computed by `pl2docx.fetch`/`pl2docx.render`
+        and passed straight through here (see `Config.instance_ids`'s
+        docstring). `None` (the default) renders as an empty string in the
+        template, same as any other unset Jinja variable.
 
     Raises
     ------
@@ -131,6 +139,6 @@ def render_document(
         for zone in zones
     ]
 
-    tpl.render({"zones": zones_context, "is_answer_key": is_answer_key})
+    tpl.render({"zones": zones_context, "is_answer_key": is_answer_key, "instance_ID": instance_id})
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tpl.save(str(output_path))
