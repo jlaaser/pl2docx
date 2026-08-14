@@ -1,26 +1,25 @@
 # Copy this file to config.yaml (gitignored) and fill in the values below.
+#
+# For a full field-by-field reference, see notes/configuration.md.
 
 base_url: "http://localhost:3000"
 
-# These identify the target course/course-instance/assessment by their stable,
-# human-authored PL identifiers rather than numeric database ids - the local dev
-# server's database is ephemeral (re-synced from disk on every restart), so numeric
-# ids can silently change and are not safe to hardcode here. pl2docx resolves these
-# to the server's current numeric ids at the start of every fetch run.
+# Identify the target course/course-instance/assessment by their stable,
+# human-authored PL identifiers, not numeric database ids (numeric ids on a local
+# dev server can change between restarts; these stable identifiers won't).
 
 # A course's short_name (its infoCourse.json "shortName"), e.g. "CHEM 0110". Shown,
-# colon-separated from the title, on the PL homepage's course list
-# (e.g. "CHEM 0110: General Chemistry I" -> short_name is "CHEM 0110").
+# colon-separated from the title, on the PL homepage's course list.
 course_short_name: null
 
 # A course instance's short_name (its infoCourseInstance.json "shortName"), e.g.
-# "0110-Test". Shown as its own "Short name" column on
+# "Fall-2026". Shown as its own "Short name" column on
 # /pl/course/<course_id>/course_admin/instances.
 course_instance_short_name: null
 
 # An assessment's tid - its directory name under assessments/ in the course repo,
-# e.g. an assessment at assessments/pl2docx-phase1-test/infoAssessment.json has
-# tid "pl2docx-phase1-test". Deliberately not the assessment's (editable) title.
+# e.g. an assessment at assessments/midterm-1/infoAssessment.json has tid "midterm-1".
+# Not the assessment's (editable) title.
 assessment_tid: null
 
 # Number of distinct instances to generate when running the fetch script.
@@ -28,26 +27,21 @@ assessment_tid: null
 n_instances: 3
 
 # Optional: explicit instance labels, one instance generated per string, in this
-# order - replaces n_instances entirely when set (non-empty). Each label becomes
-# the output folder name (output_dir/<label>/... instead of PL's numeric
-# assessment_instance_id) and the value of the instance_ID variable exposed to the
-# docx template (see template_path below) - PL still assigns its own numeric
-# instance id under the hood regardless of what you call it here. When omitted,
-# folders are still named by PL's numeric id, and instance_ID defaults to
-# "Instance 1", "Instance 2", etc.
+# order - replaces n_instances entirely when set. Each label becomes the output
+# folder name and the value of the instance_ID variable exposed to the docx
+# template. When omitted, instance_ID defaults to "Instance 1", "Instance 2", etc.
 #
 # instance_ids:
 #   - "Version A"
 #   - "Version B"
 
-# Directory (relative to the repo root, unless absolute) where fetched
-# blank/key HTML is saved, one subfolder per instance (see instance_ids above).
+# Directory (relative to wherever you run pl2docx from, unless absolute) where
+# fetched HTML and generated docx files are saved, one subfolder per instance.
 output_dir: "output"
 
 # Path to the instructor-supplied docx template used when rendering. Generate a
-# starting point with `pl2docx-starter-template` (python -m pl2docx.starter_template),
-# then customize its styles/layout in Word. The starter template exposes an
-# {{ instance_ID }} variable (see instance_ids above) right under the title.
+# starting point with `pl2docx-starter-template`, then customize its styles/layout
+# in Word.
 template_path: "template.docx"
 
 # Whether question numbering (1., 2., 3., ...) restarts at 1 at the beginning of
@@ -55,20 +49,14 @@ template_path: "template.docx"
 # default).
 restart_numbering_per_zone: false
 
-# Left indent (inches) for every widget whose content renders as its own block -
-# a fresh paragraph or table, not sharing a line with prompt text. Covers
-# multiple-choice/checkbox/fill-in-type widgets in "block" display (whether an
-# explicit config override or the auto-detected default for a non-inline,
-# non-dropdown selector), plus pl-matching and pl-order-blocks (always
-# block-shaped, since neither exposes a display setting of its own). A single
-# global value, not configurable per element kind. Set to 0 to disable.
+# Left indent (inches) for widgets whose content renders as its own block (a fresh
+# paragraph or table) rather than sharing a line with prompt text. Set to 0 to
+# disable.
 block_display_indent_inches: 0.125
 
-# Phase 3B: per-element formatting preferences (all keys optional; omitting this
-# section entirely applies built-in defaults for every widget kind). See
-# pl2docx.element_config for the full field reference. Built-in fill-in-type
-# elements (auto-detected, no config needed for basic support): pl-string-input,
-# pl-integer-input, pl-number-input, pl-symbolic-input, pl-units-input.
+# Optional per-element formatting preferences, for PrairieLearn's built-in
+# elements. All keys optional; omitting this section applies built-in defaults for
+# every element. See notes/configuration.md for the full field reference.
 #
 # global-element-preferences:
 #   pl-multiple-choice:
@@ -76,93 +64,27 @@ block_display_indent_inches: 0.125
 #     bold-correct: true        # bold the correct option in the answer key
 #     display: null              # inline | block | template | none | (auto-detect)
 #     draw-border: false        # box the whole widget (all options together)
-#     blank-answer-lines: 0      # blank lines in the blank copy's answer space for a
-#                                 # question using this widget kind - null (default)
-#                                 # means "use the built-in default" (2 lines). A
-#                                 # question with multiple widget kinds uses the
-#                                 # largest configured value across all of them.
-#   pl-checkbox:
-#     list-style: checkbox      # letter-labels | bubble | checkbox (default)
-#     bold-correct: true
-#     display: null
-#     draw-border: false
-#     blank-answer-lines: null
+#     blank-answer-lines: 0      # blank lines in the blank copy's answer space
 #   pl-string-input:
-#     display: null              # inline | block (default when undetectable) | template | none
-#     draw-border: false
-#     default-label: null        # fallback label text (e.g. "Answer:") used only when the
-#                                 # element's own source HTML has no label of its own - no
-#                                 # prefix at all by default (must opt in per element kind)
-#     blank-answer-lines: null
-#   pl-integer-input:
 #     display: null
 #     draw-border: false
-#     default-label: null
-#     blank-answer-lines: null
-#   pl-rich-text-editor:
-#     blank-answer-lines: 8      # essay-style blank space at this widget's position -
-#                                 # null (default) means 8 lines, not the generic 2-line
-#                                 # default other fill-in kinds use. The answer-key docx
-#                                 # never shows these blank lines (pl-rich-text-editor has
-#                                 # no PL concept of a "correct answer") regardless of this
-#                                 # setting - only the blank docx is affected.
-#   pl-order-blocks:
-#     layout: vertical           # vertical (default) | horizontal - vertical prints a
-#                                 # 2-column table (lettered pool block | order blank,
-#                                 # same table shape as pl-matching below); horizontal
-#                                 # prints the same content inline in one/two paragraphs
-#                                 # instead. Always vertical unless set here - not derived
-#                                 # from the fetched page's own inline/CSS state.
+#     default-label: null        # fallback label text (e.g. "Answer:"), only used
+#                                 # when the element supplies no label of its own
+
+# Optional: elements not built into pl2docx (typically course-specific ones) that
+# should be treated like a built-in behavior class. See notes/configuration.md for
+# the full field reference and the "interactive" type (for canvas-based widgets).
 #
-# additional-elements: elements not built into pl2docx (typically course-specific,
-# e.g. this one lives only in the chem 0110 course repo) that still follow the same
-# fill-in markup convention as the built-ins above (an .input-group-wrapped
-# <input>/<textarea> carrying a "pl-<element>-input" class) - detected generically
-# from the tag name alone, with no course-specific code in pl2docx itself.
-#   pl-scinum-input:
-#     type: fill-in              # selector | fill-in - which built-in behavior set to extend
+# additional-elements:
+#   my-custom-input:
+#     type: fill-in              # selector | fill-in | interactive
 #     display: null
 #     draw-border: false
-#     blank-answer-lines: 10     # e.g. give students 10 blank lines of work space for
-#                                 # this element kind specifically
-#
-#   pl-big-o-input:
-#     type: fill-in
-#     # pl-big-o-input's <input> class is "big-o-input-input" - missing the usual
-#     # "pl-" prefix every other fill-in element's class follows (e.g.
-#     # "pl-scinum-input-input" above), so the tag-name-derived detection pattern
-#     # doesn't match it out of the box. class-prefix overrides the base string used
-#     # to build that pattern, so it's still detected via the same generic mechanism:
-#     class-prefix: big-o-input
-#
-# type: interactive is a third option (Phase 5 subphase 2), for canvas-based widgets a
-# student draws on directly (fabric.js elements like pl-orbitaldiagram/
-# pl-lewisstructure). Unlike selector/fill-in, this doesn't configure how a widget
-# renders in the docx template - it's captured (screenshotted via a headless browser)
-# and flattened to a plain image entirely at fetch time (pl2docx-fetch), so by the time
-# pl2docx-render runs it's already an ordinary embedded picture, same as any other image.
-#   pl-orbitaldiagram:
-#     type: interactive
-#     # container-selector omitted -> defaults to ".pl-orbitaldiagram" (a div whose
-#     # class matches the tag name verbatim - confirmed real convention for this
-#     # element and pl-lewisstructure, but NOT universal: core PL's pl-drawing wraps
-#     # itself in ".pl-drawing-container" instead, so an element that doesn't follow
-#     # this convention needs an explicit override here, e.g.:
-#     # container-selector: ".pl-drawing-container"
-#     # hide-selectors omitted -> tries a handful of guessed toolbar/controls
-#     # selectors derived from the tag name (covers every confirmed real element's
-#     # naming, including pl-drawing's ".pl-drawing-sidebar") before falling back to
-#     # capturing whatever toolbar is visible. Set explicitly for anything else, e.g.:
-#     # hide-selectors: [".pl-drawing-sidebar"]
+#     blank-answer-lines: 10
 
 # Extra LaTeX packages to load in every rendered math snippet's preamble, beyond
-# pl2docx's small built-in default set (amsmath, amssymb, xcolor - packages virtually
-# every TeX install has). Declare anything your course's questions need here (package
-# names only, no .sty extension) rather than pl2docx guessing from equation content -
-# guessing doesn't generalize to arbitrary packages and still wouldn't guarantee the
-# package is actually installed. Validated (via kpsewhich) at the start of every
-# pl2docx-render run; a missing package fails fast with a clear error rather than each
-# affected equation silently falling back to placeholder "$latex$" text.
+# pl2docx's small built-in default set (amsmath, amssymb, xcolor). Declare anything
+# your course's questions need here (package names only, no .sty extension).
 #
 # latex-packages:
 #   - mhchem

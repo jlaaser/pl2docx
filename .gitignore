@@ -9,13 +9,18 @@ build/
 # real config with local server/course/assessment IDs - keep config.example.yaml checked in instead
 config.yaml
 
-# raw HTML fetched from the local PL server during Phase 1 development
+# runtime output: fetched HTML + generated docx files
 output/
 
 # generated instructor template (run `pl2docx-starter-template` to create your own,
 # real-world-usage default location per config.example.yaml's template_path)
 template.docx
 
-# real course assessment PDFs kept locally as formatting reference examples -
-# not this tool's content, don't belong in a publicly-distributable repo
-planning_notes/reference_examples/
+# session-by-session development planning/handoff notes - useful for the author's own
+# reference but not needed by users of the published tool; see notes/ for the
+# public-facing architecture/configuration/templating docs instead
+planning_notes/
+
+# local-only project instructions (course-specific paths, personal setup notes) -
+# see CLAUDE.md for the public-facing project instructions
+CLAUDE.local.md
