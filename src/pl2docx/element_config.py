@@ -27,7 +27,8 @@ import yaml
 
 Display = Literal["inline", "block", "template", "none"]
 ListStyle = Literal["letter-labels", "bubble", "checkbox"]
-BehaviorClass = Literal["selector", "fill-in", "interactive"]
+BehaviorClass = Literal["selector", "fill-in", "interactive", "order-blocks"]
+OrderBlocksLayout = Literal["vertical", "horizontal"]
 
 # Internal `pl2docx.html_parser.QuestionKind` values, keyed by the PL element tag name
 # used in config.yaml.
@@ -39,6 +40,8 @@ _BUILTIN_KIND_BY_TAG: dict[str, str] = {
     "pl-number-input": "number_input",
     "pl-symbolic-input": "symbolic_input",
     "pl-units-input": "units_input",
+    "pl-rich-text-editor": "rich_text_editor",
+    "pl-order-blocks": "order_blocks",
 }
 _BUILTIN_BEHAVIOR_CLASS: dict[str, BehaviorClass] = {
     "multiple_choice": "selector",
@@ -48,6 +51,8 @@ _BUILTIN_BEHAVIOR_CLASS: dict[str, BehaviorClass] = {
     "number_input": "fill-in",
     "symbolic_input": "fill-in",
     "units_input": "fill-in",
+    "rich_text_editor": "fill-in",
+    "order_blocks": "order-blocks",
 }
 _DEFAULT_LIST_STYLE_BY_KIND: dict[str, ListStyle] = {
     "multiple_choice": "bubble",
@@ -117,16 +122,50 @@ class FillInPreferences:
         can't turn off isn't a real default. Never applied when the widget already has
         its own `label`, regardless of this setting.
     blank_answer_lines : int or None
-        Same meaning as `SelectorPreferences.blank_answer_lines` — see there.
+        Same meaning as `SelectorPreferences.blank_answer_lines` — see there. Also
+        reused, unchanged, as `rich_text_editor`'s own blank-line-count knob (see
+        `pl2docx.element_renderer`'s `_RICH_TEXT_DEFAULT_BLANK_LINES` for its default
+        when unconfigured).
+    class_prefix : str or None
+        `additional-elements` fill-in entries only: overrides the base string used to
+        build `pl2docx.html_parser._add_fill_in_groups`'s `{base}-input`/
+        `{base}-multiline` detection pattern, in place of the tag itself — for an
+        element whose real class doesn't follow the usual `{tag}-input` convention
+        verbatim. Confirmed real case: `pl-big-o-input`'s `<input>` class is
+        `big-o-input-input` (missing the usual `pl-` prefix), matched by setting
+        `class-prefix: big-o-input`. `None` (the default) means "use the tag itself",
+        unchanged from before this field existed. Meaningless for built-in fill-in
+        kinds (which already match the convention exactly) — ignored there.
     """
 
     display: Display | None = None
     draw_border: bool = False
     default_label: str | None = None
     blank_answer_lines: int | None = None
+    class_prefix: str | None = None
 
 
-ElementPreferences = SelectorPreferences | FillInPreferences
+@dataclass(frozen=True)
+class OrderBlocksPreferences:
+    """Formatting preferences for `pl-order-blocks`.
+
+    Parameters
+    ----------
+    layout : {"vertical", "horizontal"}
+        Print layout for the block pool + order blanks. `"vertical"` (the default,
+        unconditionally — PL's own real-world usage always presents this element in a
+        vertical/stacked layout, per the user, so this is treated purely as a
+        pl2docx-side preference rather than derived from the fetched HTML's own
+        inline/CSS state) renders a 2-column table (lettered pool block | order blank),
+        matching `pl-matching`'s table shape. `"horizontal"` renders the same lettered
+        blocks and order blanks inline in one or two paragraphs instead. See
+        `pl2docx.element_renderer` for the actual rendering.
+    """
+
+    layout: OrderBlocksLayout = "vertical"
+
+
+ElementPreferences = SelectorPreferences | FillInPreferences | OrderBlocksPreferences
 
 
 @dataclass(frozen=True)
@@ -227,6 +266,10 @@ def load_element_config(path: str | Path) -> ElementConfig:
 
     behavior_class: dict[str, BehaviorClass] = {}
     interactive_preferences: dict[str, InteractivePreferences] = {}
+    # Note: "order-blocks" is a real BehaviorClass value but is never
+    # instructor-declarable via additional-elements - pl-order-blocks is already a
+    # built-in kind (_BUILTIN_BEHAVIOR_CLASS), and there's no course-specific element
+    # expected to share its bespoke DOM shape.
     additional = raw.get("additional-elements") or {}
     for tag, entry in additional.items():
         entry = entry or {}
@@ -266,6 +309,8 @@ def _build_preferences(behavior_class: BehaviorClass, entry: dict) -> ElementPre
     entry = {k.replace("-", "_"): v for k, v in entry.items()}
     if behavior_class == "selector":
         return SelectorPreferences(**entry)
+    if behavior_class == "order-blocks":
+        return OrderBlocksPreferences(**entry)
     return FillInPreferences(**entry)
 
 
@@ -328,6 +373,8 @@ def resolve_preferences(element_config: ElementConfig, kind: str) -> ElementPref
         )
     if behavior_class == "selector":
         return SelectorPreferences(list_style=_DEFAULT_LIST_STYLE_BY_KIND.get(kind, "bubble"))
+    if behavior_class == "order-blocks":
+        return OrderBlocksPreferences()
     return FillInPreferences()
 
 
@@ -351,6 +398,32 @@ def additional_fill_in_tags(element_config: ElementConfig) -> list[str]:
         do generically, without any course-specific knowledge in `pl2docx` itself.
     """
     return [tag for tag, cls in element_config.behavior_class.items() if cls == "fill-in"]
+
+
+def additional_fill_in_class_prefixes(element_config: ElementConfig) -> dict[str, str]:
+    """Resolve `additional-elements` fill-in tags' `class_prefix` overrides.
+
+    Parameters
+    ----------
+    element_config : ElementConfig
+        The run's loaded element configuration.
+
+    Returns
+    -------
+    dict[str, str]
+        Tag name -> override base string, for every `additional-elements` fill-in
+        entry that set `class-prefix`. Tags without an explicit override are simply
+        absent (not mapped to themselves) — meant to be passed straight through to
+        `pl2docx.html_parser.parse_instance_question_html`'s
+        `additional_fill_in_class_prefixes` parameter, which already falls back to
+        using the tag itself for any tag missing from this dict.
+    """
+    result: dict[str, str] = {}
+    for tag in additional_fill_in_tags(element_config):
+        prefs = element_config.preferences.get(tag)
+        if isinstance(prefs, FillInPreferences) and prefs.class_prefix is not None:
+            result[tag] = prefs.class_prefix
+    return result
 
 
 def additional_interactive_tags(element_config: ElementConfig) -> dict[str, InteractivePreferences]:

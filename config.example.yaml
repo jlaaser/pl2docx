@@ -90,6 +90,20 @@ restart_numbering_per_zone: false
 #     draw-border: false
 #     default-label: null
 #     blank-answer-lines: null
+#   pl-rich-text-editor:
+#     blank-answer-lines: 8      # essay-style blank space at this widget's position -
+#                                 # null (default) means 8 lines, not the generic 2-line
+#                                 # default other fill-in kinds use. The answer-key docx
+#                                 # never shows these blank lines (pl-rich-text-editor has
+#                                 # no PL concept of a "correct answer") regardless of this
+#                                 # setting - only the blank docx is affected.
+#   pl-order-blocks:
+#     layout: vertical           # vertical (default) | horizontal - vertical prints a
+#                                 # 2-column table (lettered pool block | order blank,
+#                                 # same table shape as pl-matching below); horizontal
+#                                 # prints the same content inline in one/two paragraphs
+#                                 # instead. Always vertical unless set here - not derived
+#                                 # from the fetched page's own inline/CSS state.
 #
 # additional-elements: elements not built into pl2docx (typically course-specific,
 # e.g. this one lives only in the chem 0110 course repo) that still follow the same
@@ -102,6 +116,15 @@ restart_numbering_per_zone: false
 #     draw-border: false
 #     blank-answer-lines: 10     # e.g. give students 10 blank lines of work space for
 #                                 # this element kind specifically
+#
+#   pl-big-o-input:
+#     type: fill-in
+#     # pl-big-o-input's <input> class is "big-o-input-input" - missing the usual
+#     # "pl-" prefix every other fill-in element's class follows (e.g.
+#     # "pl-scinum-input-input" above), so the tag-name-derived detection pattern
+#     # doesn't match it out of the box. class-prefix overrides the base string used
+#     # to build that pattern, so it's still detected via the same generic mechanism:
+#     class-prefix: big-o-input
 #
 # type: interactive is a third option (Phase 5 subphase 2), for canvas-based widgets a
 # student draws on directly (fabric.js elements like pl-orbitaldiagram/

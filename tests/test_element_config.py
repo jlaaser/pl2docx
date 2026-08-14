@@ -3,7 +3,9 @@ import pytest
 from pl2docx.element_config import (
     FillInPreferences,
     InteractivePreferences,
+    OrderBlocksPreferences,
     SelectorPreferences,
+    additional_fill_in_class_prefixes,
     additional_interactive_tags,
     load_element_config,
     resolve_preferences,
@@ -241,3 +243,79 @@ additional-elements:
     resolved = additional_interactive_tags(config)
     assert resolved["pl-drawing"].container_selector == ".pl-drawing-container"
     assert resolved["pl-drawing"].hide_selectors == [".pl-drawing-sidebar"]
+
+
+# --- Phase 7: rich_text_editor/order_blocks built-ins, big-o-input class_prefix ---
+
+
+def test_rich_text_editor_is_builtin_fill_in(tmp_path):
+    path = _write(tmp_path, "base_url: 'http://localhost:3000'\n")
+    config = load_element_config(path)
+    assert resolve_preferences(config, "rich_text_editor") == FillInPreferences()
+
+
+def test_rich_text_editor_blank_answer_lines_configurable(tmp_path):
+    path = _write(
+        tmp_path,
+        """
+global-element-preferences:
+  pl-rich-text-editor:
+    blank-answer-lines: 12
+""",
+    )
+    config = load_element_config(path)
+    prefs = resolve_preferences(config, "rich_text_editor")
+    assert prefs.blank_answer_lines == 12
+
+
+def test_order_blocks_is_builtin_with_vertical_default(tmp_path):
+    path = _write(tmp_path, "base_url: 'http://localhost:3000'\n")
+    config = load_element_config(path)
+    prefs = resolve_preferences(config, "order_blocks")
+    assert prefs == OrderBlocksPreferences(layout="vertical")
+
+
+def test_order_blocks_layout_configurable(tmp_path):
+    path = _write(
+        tmp_path,
+        """
+global-element-preferences:
+  pl-order-blocks:
+    layout: horizontal
+""",
+    )
+    config = load_element_config(path)
+    prefs = resolve_preferences(config, "order_blocks")
+    assert prefs == OrderBlocksPreferences(layout="horizontal")
+
+
+def test_big_o_input_class_prefix_parsed(tmp_path):
+    path = _write(
+        tmp_path,
+        """
+additional-elements:
+  pl-big-o-input:
+    type: fill-in
+    class-prefix: big-o-input
+""",
+    )
+    config = load_element_config(path)
+    prefs = resolve_preferences(config, "pl-big-o-input")
+    assert prefs == FillInPreferences(class_prefix="big-o-input")
+
+
+def test_additional_fill_in_class_prefixes_resolves_only_configured_tags(tmp_path):
+    path = _write(
+        tmp_path,
+        """
+additional-elements:
+  pl-big-o-input:
+    type: fill-in
+    class-prefix: big-o-input
+  pl-scinum-input:
+    type: fill-in
+""",
+    )
+    config = load_element_config(path)
+    resolved = additional_fill_in_class_prefixes(config)
+    assert resolved == {"pl-big-o-input": "big-o-input"}

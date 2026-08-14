@@ -18,16 +18,30 @@ from pathlib import Path
 
 from pl2docx.config import load_config
 from pl2docx.docx_builder import ZoneQuestions, render_document
-from pl2docx.element_config import ElementConfig, additional_fill_in_tags, load_element_config
+from pl2docx.element_config import (
+    ElementConfig,
+    additional_fill_in_class_prefixes,
+    additional_fill_in_tags,
+    load_element_config,
+)
 from pl2docx.html_parser import ParsedQuestion, parse_instance_question_html
 from pl2docx.latex_math import configure_extra_packages
 
 
 def _load_question(
-    html_dir: Path, instance_question_id: int, extra_fill_in_tags: list[str]
+    html_dir: Path,
+    instance_question_id: int,
+    extra_fill_in_tags: list[str],
+    extra_fill_in_class_prefixes: dict[str, str],
+    is_answer_key: bool,
 ) -> ParsedQuestion:
     html = (html_dir / f"{instance_question_id}.html").read_text(encoding="utf-8")
-    return parse_instance_question_html(html, additional_fill_in_tags=extra_fill_in_tags)
+    return parse_instance_question_html(
+        html,
+        additional_fill_in_tags=extra_fill_in_tags,
+        additional_fill_in_class_prefixes=extra_fill_in_class_prefixes,
+        is_answer_key=is_answer_key,
+    )
 
 
 def _build_zones(
@@ -35,6 +49,7 @@ def _build_zones(
     zones_structure: list[dict],
     element_config: ElementConfig | None,
     restart_numbering_per_zone: bool = False,
+    is_answer_key: bool = False,
 ) -> list[ZoneQuestions]:
     """Pair each zone's questions with their 1-based question number.
 
@@ -45,8 +60,15 @@ def _build_zones(
         (the default) numbers continuously across the whole document,
         matching PL's own numbering convention and this project's original
         behavior.
+    is_answer_key : bool
+        Whether `html_dir` holds answer-key (rather than blank) HTML —
+        threaded straight through to `parse_instance_question_html`'s own
+        `is_answer_key` parameter (see there for what it controls).
     """
     extra_fill_in_tags = additional_fill_in_tags(element_config) if element_config else []
+    extra_fill_in_class_prefixes = (
+        additional_fill_in_class_prefixes(element_config) if element_config else {}
+    )
     zones: list[ZoneQuestions] = []
     number = 1
     for zone in zones_structure:
@@ -54,7 +76,10 @@ def _build_zones(
             number = 1
         questions: list[tuple[ParsedQuestion, int]] = []
         for iq_id in zone["instance_question_ids"]:
-            questions.append((_load_question(html_dir, iq_id, extra_fill_in_tags), number))
+            question = _load_question(
+                html_dir, iq_id, extra_fill_in_tags, extra_fill_in_class_prefixes, is_answer_key
+            )
+            questions.append((question, number))
             number += 1
         zones.append({"title": zone["title"], "questions": questions})
     return zones
@@ -110,7 +135,13 @@ def render_instance(
 
     render_document(
         template_path,
-        _build_zones(instance_dir / "blank", zones_structure, element_config, restart_numbering_per_zone),
+        _build_zones(
+            instance_dir / "blank",
+            zones_structure,
+            element_config,
+            restart_numbering_per_zone,
+            is_answer_key=False,
+        ),
         is_answer_key=False,
         output_path=blank_path,
         element_config=element_config,
@@ -119,7 +150,13 @@ def render_instance(
     )
     render_document(
         template_path,
-        _build_zones(instance_dir / "key", zones_structure, element_config, restart_numbering_per_zone),
+        _build_zones(
+            instance_dir / "key",
+            zones_structure,
+            element_config,
+            restart_numbering_per_zone,
+            is_answer_key=True,
+        ),
         is_answer_key=True,
         output_path=key_path,
         element_config=element_config,

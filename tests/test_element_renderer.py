@@ -6,7 +6,7 @@ import pytest
 from docx.shared import Inches
 from docxtpl import DocxTemplate
 
-from pl2docx.element_config import ElementConfig, FillInPreferences, SelectorPreferences
+from pl2docx.element_config import ElementConfig, FillInPreferences, OrderBlocksPreferences, SelectorPreferences
 from pl2docx.element_renderer import build_question_context, create_list_formats
 from pl2docx.html_parser import ImageRef, MathRef, ParsedQuestion, SvgRef, Widget, plain
 from pl2docx.latex_math import LatexRenderError

@@ -1,0 +1,106 @@
+<div class="question-block">
+  <div class="card-header bg-primary text-white"><h1>Sample Matching Question</h1></div>
+  <div class="card-body question-body">
+    <p>Match each country to its capital.</p>
+    <div class="pl-matching-container pl-matching-container-right">
+      <div class="pl-matching-statements">
+        <div class="pl-matching-statement">
+          <div class="pl-matching-statement-select">
+            <select name="matching_countries" class="form-select" disabled>
+              <option value="0">1</option>
+              <option value="1">2</option>
+              <option value="2" selected>3</option>
+            </select>
+          </div>
+          <div class="pl-matching-statement-text" id="statement-label-0">United States</div>
+        </div>
+        <div class="pl-matching-statement">
+          <div class="pl-matching-statement-select">
+            <select name="matching_countries" class="form-select" disabled>
+              <option value="0">1</option>
+              <option value="1" selected>2</option>
+              <option value="2">3</option>
+            </select>
+          </div>
+          <div class="pl-matching-statement-text" id="statement-label-1">France</div>
+        </div>
+        <div class="pl-matching-statement">
+          <div class="pl-matching-statement-select">
+            <select name="matching_countries" class="form-select" disabled>
+              <option value="0" selected>1</option>
+              <option value="1">2</option>
+              <option value="2">3</option>
+            </select>
+          </div>
+          <div class="pl-matching-statement-text" id="statement-label-2">Mexico</div>
+        </div>
+      </div>
+      <div class="pl-matching-options">
+        <ol>
+          <li class="pl-matching-option" style="--pl-matching-counter-type: decimal">
+            <span id="pl-matching-uuid-option-0-content">Mexico City</span>
+          </li>
+          <li class="pl-matching-option" style="--pl-matching-counter-type: decimal">
+            <span id="pl-matching-uuid-option-1-content">Paris</span>
+          </li>
+          <li class="pl-matching-option" style="--pl-matching-counter-type: decimal">
+            <span id="pl-matching-uuid-option-2-content">Washington, D.C.</span>
+          </li>
+        </ol>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="card mb-3 grading-block">
+  <div class="card-header bg-secondary text-white"><h2>Correct answer</h2></div>
+  <div class="card-body overflow-x-auto answer-body">
+    <div class="d-flex">
+      <div class="pl-matching-statements">
+        <div class="pl-matching-statement">
+          <div class="pl-matching-answer"><strong>3</strong> Washington, D.C.</div>
+          <div class="pl-matching-statement-text">United States</div>
+        </div>
+        <div class="pl-matching-statement">
+          <div class="pl-matching-answer"><strong>2</strong> Paris</div>
+          <div class="pl-matching-statement-text">France</div>
+        </div>
+        <div class="pl-matching-statement">
+          <div class="pl-matching-answer"><strong>1</strong> Mexico City</div>
+          <div class="pl-matching-statement-text">Mexico</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="card mb-4" id="question-score-panel">
+  <div class="card-header bg-secondary text-white"><h2>Question U1.1</h2></div>
+  <table class="table table-sm two-column-description-no-header" id="question-score-panel-content">
+    <tbody>
+      <tr><td>Value:</td><td>
+    1
+    <button type="button" class="btn btn-xs js-value-popover"><i class="fa fa-question-circle" aria-hidden="true"></i></button>
+  </td></tr>
+      <tr><td>Total points:</td><td>0/1</td></tr>
+    </tbody>
+  </table>
+</div>
+<div class="card mb-3 border-warning">
+  <div class="card-header bg-warning"><h2>Staff information</h2></div>
+  <div class="list-group list-group-flush">
+    <div class="list-group-item py-3">
+      <div>QID:</div>
+      <div><a href="/pl/course_instance/1/instructor/question/1">TEST/matching</a></div>
+    </div>
+    <div class="list-group-item py-3">
+      <h3 class="card-title h5">Variant</h3>
+      <div class="d-flex flex-wrap">
+        <details class="pe-1">
+          <summary>Show/Hide answer</summary>
+          <pre class="mt-2 mb-0"><code>{
+  "matching_countries": [2, 1, 0]
+}</code></pre>
+        </details>
+      </div>
+    </div>
+  </div>
+</div>

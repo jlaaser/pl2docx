@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import pytest
@@ -59,7 +60,7 @@ def test_multiple_choice_blank():
 
 
 def test_multiple_choice_key():
-    q = parse_instance_question_html(_load("multiple_choice_key.html"))
+    q = parse_instance_question_html(_load("multiple_choice_key.html"), is_answer_key=True)
     widget = q.widgets[0]
     assert widget.kind == "multiple_choice"
     assert _options(widget) == ["Option A text", "Option B text", "Option C text"]
@@ -75,7 +76,7 @@ def test_multiple_choice_hidden_answer_key():
     "Variant" panel's JSON is independent of that suppression, so correct_option_indices
     must still resolve correctly via it (this was bug #1 of the two reported: the old
     approach silently gave up here)."""
-    q = parse_instance_question_html(_load("multiple_choice_hidden_answer_key.html"))
+    q = parse_instance_question_html(_load("multiple_choice_hidden_answer_key.html"), is_answer_key=True)
     widget = q.widgets[0]
     assert widget.kind == "multiple_choice"
     assert widget.correct_option_indices == [1]
@@ -83,6 +84,18 @@ def test_multiple_choice_hidden_answer_key():
         "Option B is correct because it is the only statement consistent with the setup described above."
     )
     assert q.points == "2"
+
+
+def test_multiple_choice_correct_option_indices_suppressed_without_is_answer_key():
+    """Regression: PL's staff "Variant" JSON panel is present even on blank/
+    open-instance HTML (confirmed against real fetched HTML, not just this
+    fixture) - resolving it unconditionally would leak the correct answer
+    (bold_correct) onto the student's own blank copy. Parsing key HTML with
+    is_answer_key left at its default (False) must suppress
+    correct_option_indices entirely, even though the JSON panel is technically
+    present in this fixture too."""
+    q = parse_instance_question_html(_load("multiple_choice_key.html"))
+    assert q.widgets[0].correct_option_indices == []
 
 
 def test_math_blank():
@@ -117,7 +130,7 @@ def test_checkbox_blank():
 
 
 def test_checkbox_key():
-    q = parse_instance_question_html(_load("checkbox_key.html"))
+    q = parse_instance_question_html(_load("checkbox_key.html"), is_answer_key=True)
     widget = q.widgets[0]
     assert widget.kind == "checkbox"
     assert _option_keys(widget) == ["a", "b", "c"]
@@ -295,7 +308,7 @@ def test_compound_dropdowns_with_overlapping_options_each_get_own_correct_answer
 }"""
         )
     )
-    q = parse_instance_question_html(html)
+    q = parse_instance_question_html(html, is_answer_key=True)
     by_name = {w.name: w for w in q.widgets}
     assert _options(by_name["statement-0"]) == ["chemical property", "physical property"]
     assert by_name["statement-0"].correct_option_indices == [1]
@@ -1041,4 +1054,141 @@ def test_format_points_text():
     assert format_points_text(2.0, "2") == "2 points"
     assert format_points_text(1.5, "1.5") == "1.5 points"
     assert format_points_text(None, "up to 2") == "up to 2"
+
+
+# --- Phase 7: pl-rich-text-editor, pl-matching, pl-order-blocks, pl-big-o-input ---
+
+
+def test_rich_text_editor_blank():
+    q = parse_instance_question_html(_load("rich_text_editor_blank.html"))
+    assert len(q.widgets) == 1
+    widget = q.widgets[0]
+    assert widget.kind == "rich_text_editor"
+    assert widget.name == "essay_answer"
+    assert widget.suppress_in_key is False
+    assert q.answer_panel_text is None
+
+
+def test_rich_text_editor_key_suppressed_when_is_answer_key():
+    q = parse_instance_question_html(_load("rich_text_editor_key.html"), is_answer_key=True)
+    widget = q.widgets[0]
+    assert widget.kind == "rich_text_editor"
+    assert widget.suppress_in_key is True
+    # The page-wide answer panel is unaffected by suppression - an instructor's
+    # freestanding model-answer text still comes through.
+    assert _answer(q) == "A strong response should mention that the forward and reverse reaction rates become equal."
+
+
+def test_rich_text_editor_key_not_suppressed_without_is_answer_key_flag():
+    """Parsing key HTML without passing is_answer_key=True leaves the widget unsuppressed -
+    is_answer_key is an explicit caller signal, not inferred from the HTML itself."""
+    q = parse_instance_question_html(_load("rich_text_editor_key.html"))
+    assert q.widgets[0].suppress_in_key is False
+
+
+def test_matching_blank():
+    q = parse_instance_question_html(_load("matching_blank.html"))
+    assert len(q.widgets) == 1
+    widget = q.widgets[0]
+    assert widget.kind == "matching"
+    assert widget.name == "matching_countries"
+    assert [plain_text(s) for s in widget.statements] == ["United States", "France", "Mexico"]
+    assert [plain_text(o) for o in widget.match_options] == ["Mexico City", "Paris", "Washington, D.C."]
+    assert widget.counter_type == "decimal"
+    assert widget.correct_labels == [None, None, None]
+
+
+def test_matching_key_resolves_correct_labels_from_variant_json():
+    q = parse_instance_question_html(_load("matching_key.html"), is_answer_key=True)
+    widget = q.widgets[0]
+    assert widget.kind == "matching"
+    # true_answer["matching_countries"] = [2, 1, 0] (0-based option indices) ->
+    # decimal-formatted 1-based labels "3"/"2"/"1", per statement order.
+    assert widget.correct_labels == ["3", "2", "1"]
+
+
+def test_matching_correct_labels_falls_back_to_html_when_json_unavailable():
+    """With no Variant JSON at all (only the rendered .pl-matching-answer HTML,
+    as if fetched by a viewer without the JSON-first route resolving), the
+    HTML-scraping fallback must still resolve the same correct labels."""
+    key_html = _load("matching_key.html")
+    stripped = re.sub(
+        r'<div class="card mb-3 border-warning">.*?</div>\s*$', "", key_html, flags=re.DOTALL
+    )
+    q = parse_instance_question_html(stripped, is_answer_key=True)
+    assert q.widgets[0].correct_labels == ["3", "2", "1"]
+
+
+def test_matching_correct_labels_suppressed_without_is_answer_key():
+    """Same regression as
+    test_multiple_choice_correct_option_indices_suppressed_without_is_answer_key,
+    for matching's JSON-first correct-label resolution."""
+    q = parse_instance_question_html(_load("matching_key.html"))
+    assert q.widgets[0].correct_labels == [None, None, None]
+
+
+def test_order_blocks_blank():
+    q = parse_instance_question_html(_load("order_blocks_blank.html"))
+    assert len(q.widgets) == 1
+    widget = q.widgets[0]
+    assert widget.kind == "order_blocks"
+    assert [plain_text(b) for b in widget.blocks] == [
+        "Add reactants to flask",
+        "Heat to reflux",
+        "Cool to room temperature",
+        "Filter the precipitate",
+    ]
+    assert widget.correct_order is None
+
+
+def test_order_blocks_key_resolves_correct_order_excluding_distractor():
+    q = parse_instance_question_html(_load("order_blocks_key.html"), is_answer_key=True)
+    widget = q.widgets[0]
+    assert widget.kind == "order_blocks"
+    # "Cool to room temperature" (pool index 2) is a distractor - present in the
+    # pool but absent from the correct-answer panel, so it's excluded here.
+    assert widget.correct_order == [0, 1, 3]
+
+
+def test_order_blocks_correct_order_suppressed_without_is_answer_key():
+    """Same regression as
+    test_matching_correct_labels_suppressed_without_is_answer_key, for
+    order_blocks' answer_body-based correct_order resolution."""
+    q = parse_instance_question_html(_load("order_blocks_key.html"))
+    assert q.widgets[0].correct_order is None
+
+
+def test_big_o_input_detected_via_class_prefix_override():
+    q = parse_instance_question_html(
+        _load("big_o_input_blank.html"),
+        additional_fill_in_tags=["pl-big-o-input"],
+        additional_fill_in_class_prefixes={"pl-big-o-input": "big-o-input"},
+    )
+    assert len(q.widgets) == 1
+    widget = q.widgets[0]
+    assert widget.kind == "pl-big-o-input"
+    assert widget.name == "answer"
+    assert plain_text(widget.label) == "O("
+    assert plain_text(widget.suffix) == ")"
+    assert widget.width_chars == 20
+
+
+def test_big_o_input_not_detected_without_class_prefix_override():
+    """Without the override, pl-big-o-input's non-conforming class ("big-o-input-input",
+    missing the usual "pl-" prefix) simply isn't matched - confirms the override is what
+    makes detection work, not some other incidental match."""
+    q = parse_instance_question_html(
+        _load("big_o_input_blank.html"), additional_fill_in_tags=["pl-big-o-input"]
+    )
+    assert q.widgets == []
+
+
+def test_big_o_input_key_answer():
+    q = parse_instance_question_html(
+        _load("big_o_input_key.html"),
+        additional_fill_in_tags=["pl-big-o-input"],
+        additional_fill_in_class_prefixes={"pl-big-o-input": "big-o-input"},
+    )
+    assert q.widgets[0].kind == "pl-big-o-input"
+    assert _answer(q) == "The correct answer is O(log n)."
     assert format_points_text(None, None) is None

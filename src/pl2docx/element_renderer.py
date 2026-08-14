@@ -80,6 +80,7 @@ from pl2docx.html_parser import (
     SvgRef,
     TextRun,
     Widget,
+    format_counter,
     format_points_text,
     option_letter,
 )
@@ -439,6 +440,25 @@ def _build_question_contents(
         # content, e.g. physical-or-chemical's images+arrow+colon before
         # each widget, confirmed by tracing through real fetched HTML.)
         append_nodes(question.prompt_segments[i])
+
+        # matching/order_blocks/rich_text_editor render into a table or
+        # multi-paragraph block unlike anything the generic inline/block
+        # selector-or-fill-in dispatch below assumes, so they're handled
+        # entirely separately, before `resolve_preferences` is even called
+        # (in particular, "matching" has no registered behavior class at all
+        # - see element_config.py - since it currently exposes no
+        # configurable preferences).
+        if widget.kind == "rich_text_editor":
+            prefs = resolve_preferences(element_config, widget.kind)
+            _render_rich_text_editor(subdoc, state, widget, prefs)
+            continue
+        if widget.kind == "matching":
+            _render_matching(subdoc, state, widget, image_base_dir)
+            continue
+        if widget.kind == "order_blocks":
+            prefs = resolve_preferences(element_config, widget.kind)
+            _render_order_blocks(subdoc, state, widget, prefs, image_base_dir)
+            continue
 
         prefs = resolve_preferences(element_config, widget.kind)
         display = _resolve_display(widget, prefs)
@@ -1016,6 +1036,193 @@ def _add_run_border(run: Run) -> None:
     rPr.append(bdr)
 
 
+#: Default blank-line count for a `pl-rich-text-editor` widget, when
+#: `FillInPreferences.blank_answer_lines` isn't configured — larger than
+#: `ANSWER_SPACE_BLANK_LINES` since this element is meant for an essay-length
+#: response, not a short fill-in answer (confirmed with the user).
+_RICH_TEXT_DEFAULT_BLANK_LINES = 8
+
+#: Blank line used for a `pl-order-blocks` "Order:" position, when the
+#: correct answer isn't known (blank docx) — shorter than `_blank_text`'s
+#: fill-in blanks since it only ever needs to hold one letter.
+_ORDER_BLANK = "____"
+
+
+def _render_rich_text_editor(subdoc, state: dict, widget: Widget, prefs) -> None:
+    """Render a `rich_text_editor` widget as blank lines at its source position.
+
+    Renders nothing at all when `widget.suppress_in_key` is set (this widget
+    was parsed from answer-key HTML - `pl-rich-text-editor` has no PL concept
+    of a correct answer, so the key docx shouldn't reproduce the student's
+    blank writing space - see `Widget.suppress_in_key`'s docstring). The
+    question's page-wide `answer_contents` is built entirely separately and
+    is unaffected either way.
+    """
+    if widget.suppress_in_key:
+        return
+    if state["paragraph"].runs:
+        state["paragraph"] = subdoc.add_paragraph()
+    blank_lines = prefs.blank_answer_lines if prefs.blank_answer_lines is not None else _RICH_TEXT_DEFAULT_BLANK_LINES
+    for _ in range(max(blank_lines - 1, 0)):
+        subdoc.add_paragraph("")
+    state["paragraph"] = subdoc.add_paragraph()
+
+
+def _style_two_column_table(table) -> None:
+    """Style `table` as a borderless 2-column layout table with extra top cell margin.
+
+    Matches the user's own reference mockup
+    (`planning_notes/reference_examples/examples_for_matching_and_order_blocks.docx`):
+    no visible borders at all (this is a layout aid, not a data table), and a
+    slightly larger top margin per cell (144 twips = 0.1in, read directly off
+    that mockup's own `<w:tblCellMar>`) for readability between rows. Shared
+    by both `pl-matching` and `pl-order-blocks`' vertical layout - the one
+    piece of real reuse between the two elements' otherwise distinct table
+    shapes.
+    """
+    tbl_pr = table._tbl.tblPr
+    borders = OxmlElement("w:tblBorders")
+    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        el = OxmlElement(f"w:{edge}")
+        el.set(qn("w:val"), "none")
+        el.set(qn("w:sz"), "0")
+        el.set(qn("w:space"), "0")
+        el.set(qn("w:color"), "auto")
+        borders.append(el)
+    tbl_pr.append(borders)
+    cell_mar = OxmlElement("w:tblCellMar")
+    top = OxmlElement("w:top")
+    top.set(qn("w:w"), "144")
+    top.set(qn("w:type"), "dxa")
+    cell_mar.append(top)
+    tbl_pr.append(cell_mar)
+
+
+def _render_matching(subdoc, state: dict, widget: Widget, image_base_dir: Path | None) -> None:
+    """Render a `matching` widget as a 2-column table (statement | option).
+
+    Left column: a blank + statement (`"_____ United States"`, blank docx —
+    no `correct_labels` known yet) or the correct option's bold counter label
+    + statement (`"1. United States"`, key docx) — the confirmed judgment
+    call from planning. Right column: every option, each prefixed with its
+    own counter marker per `widget.counter_type` (empty for `"full-text"`,
+    matching PL's own `no_counters` behavior) — shown in both blank and key
+    docx, since PL's own answer panel doesn't re-show the option list either
+    way and repeating it keeps the key self-contained.
+    """
+    if state["paragraph"].runs:
+        state["paragraph"] = subdoc.add_paragraph()
+    rows = max(len(widget.statements), len(widget.match_options), 1)
+    table = subdoc.add_table(rows=rows, cols=2)
+    _style_two_column_table(table)
+
+    for i in range(len(widget.statements)):
+        paragraph = table.cell(i, 0).paragraphs[0]
+        label = widget.correct_labels[i] if i < len(widget.correct_labels) else None
+        if label:
+            marker_run = paragraph.add_run(f"{label}.")
+            marker_run.bold = True
+            paragraph.add_run(" ")
+        else:
+            paragraph.add_run("_" * _DEFAULT_BLANK_CHARS)
+            paragraph.add_run(" ")
+        _render_nodes_to_paragraph(paragraph, widget.statements[i], image_base_dir)
+
+    for i in range(len(widget.match_options)):
+        paragraph = table.cell(i, 1).paragraphs[0]
+        marker = format_counter(i, widget.counter_type)
+        if marker:
+            paragraph.add_run(f"{marker}. ")
+        _render_nodes_to_paragraph(paragraph, widget.match_options[i], image_base_dir)
+
+    state["paragraph"] = subdoc.add_paragraph()
+
+
+def _render_order_blocks(
+    subdoc, state: dict, widget: Widget, prefs, image_base_dir: Path | None
+) -> None:
+    """Dispatch a `order_blocks` widget to its vertical/horizontal renderer, per `prefs.layout`."""
+    if prefs.layout == "horizontal":
+        _render_order_blocks_horizontal(subdoc, state, widget, image_base_dir)
+    else:
+        _render_order_blocks_vertical(subdoc, state, widget, image_base_dir)
+
+
+def _render_order_blocks_vertical(subdoc, state: dict, widget: Widget, image_base_dir: Path | None) -> None:
+    """Render `pl-order-blocks` as a 2-column table (lettered pool block | order blank).
+
+    Row 0 is a header row (blank left cell, `"Order:"` right cell, matching the
+    user's reference mockup exactly). Every pool block (distractors included,
+    per the user's confirmed choice) gets its own row, lettered `A.`, `B.`, ...
+    in on-page pool order. The right column only gets as many blank rows as
+    the correct sequence's length (`widget.correct_order`), or `len(blocks)`
+    on the blank docx where the correct order isn't known yet — filled with
+    the correct letter sequence on the key docx, per the confirmed judgment
+    call.
+    """
+    if state["paragraph"].runs:
+        state["paragraph"] = subdoc.add_paragraph()
+
+    n_blanks = len(widget.correct_order) if widget.correct_order is not None else len(widget.blocks)
+    rows = max(len(widget.blocks), n_blanks, 1) + 1
+    table = subdoc.add_table(rows=rows, cols=2)
+    _style_two_column_table(table)
+    table.cell(0, 1).paragraphs[0].add_run("Order:")
+
+    for i, block_nodes in enumerate(widget.blocks):
+        paragraph = table.cell(i + 1, 0).paragraphs[0]
+        letter = format_counter(i, "upper-alpha")
+        paragraph.add_run(f"{letter}.")
+        paragraph.add_run(" ")
+        _render_nodes_to_paragraph(paragraph, block_nodes, image_base_dir)
+
+    correct_letters = (
+        [format_counter(idx, "upper-alpha") for idx in widget.correct_order]
+        if widget.correct_order is not None
+        else None
+    )
+    for i in range(n_blanks):
+        paragraph = table.cell(i + 1, 1).paragraphs[0]
+        paragraph.add_run(correct_letters[i] if correct_letters is not None else _ORDER_BLANK)
+
+    state["paragraph"] = subdoc.add_paragraph()
+
+
+def _render_order_blocks_horizontal(subdoc, state: dict, widget: Widget, image_base_dir: Path | None) -> None:
+    """Render `pl-order-blocks` inline: lettered blocks in one paragraph, blanks in the next.
+
+    Same content/lettering as the vertical layout, just placed as runs in two
+    paragraphs instead of table cells (`"A. 1   B. 2   C. 3   D. 4"` then
+    `"Order:  ____  ____  ____  ____"`), per the user's reference mockup.
+    """
+    if state["paragraph"].runs:
+        state["paragraph"] = subdoc.add_paragraph()
+
+    pool_paragraph = subdoc.add_paragraph()
+    for i, block_nodes in enumerate(widget.blocks):
+        if i > 0:
+            pool_paragraph.add_run("   ")
+        letter = format_counter(i, "upper-alpha")
+        pool_paragraph.add_run(f"{letter}.")
+        pool_paragraph.add_run(" ")
+        _render_nodes_to_paragraph(pool_paragraph, block_nodes, image_base_dir)
+
+    order_paragraph = subdoc.add_paragraph()
+    order_paragraph.add_run("Order: ")
+    n_blanks = len(widget.correct_order) if widget.correct_order is not None else len(widget.blocks)
+    correct_letters = (
+        [format_counter(idx, "upper-alpha") for idx in widget.correct_order]
+        if widget.correct_order is not None
+        else None
+    )
+    for i in range(n_blanks):
+        if i > 0:
+            order_paragraph.add_run("  ")
+        order_paragraph.add_run(correct_letters[i] if correct_letters is not None else _ORDER_BLANK)
+
+    state["paragraph"] = subdoc.add_paragraph()
+
+
 def _build_answer_contents(
     tpl: DocxTemplate,
     question: ParsedQuestion,
@@ -1047,10 +1254,22 @@ def _resolve_answer_space_lines(question: ParsedQuestion, element_config: Elemen
     needs room for whichever of its parts needs the most space, not the least).
     Falls back to `ANSWER_SPACE_BLANK_LINES` when the question has no widgets at all,
     or none of its widgets' kinds configure this preference.
+
+    `matching`/`order_blocks` widgets are skipped entirely: `"matching"` has no
+    registered behavior class at all (`resolve_preferences` raises `KeyError` for
+    it), and `OrderBlocksPreferences` has no `blank_answer_lines` field in the
+    first place (`getattr` returns `None` for it) — neither kind uses the
+    trailing answer_space (they render their own content inline), so both are
+    simply excluded from the max-across-widgets calculation rather than treated
+    as an error.
     """
-    configured = [
-        prefs.blank_answer_lines
-        for widget in question.widgets
-        if (prefs := resolve_preferences(element_config, widget.kind)).blank_answer_lines is not None
-    ]
+    configured: list[int] = []
+    for widget in question.widgets:
+        try:
+            prefs = resolve_preferences(element_config, widget.kind)
+        except KeyError:
+            continue
+        blank_lines = getattr(prefs, "blank_answer_lines", None)
+        if blank_lines is not None:
+            configured.append(blank_lines)
     return max(configured) if configured else ANSWER_SPACE_BLANK_LINES

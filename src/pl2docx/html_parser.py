@@ -59,7 +59,7 @@ import json
 import re
 import string
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
 from bs4 import BeautifulSoup, Comment, NavigableString, Tag
@@ -432,6 +432,51 @@ class Widget:
         `additional-elements` fill-in tag that doesn't follow this
         convention) - callers should fall back to a fixed blank width in
         that case. Always `None` for `multiple_choice`/`checkbox`.
+    suppress_in_key : bool
+        For `rich_text_editor` only: `True` when this widget was parsed from
+        answer-key HTML (`parse_instance_question_html(..., is_answer_key=True)`).
+        `pl-rich-text-editor` has no PL concept of a "correct answer" (its own
+        `render(panel="answer")` always returns empty), so the renderer skips
+        this widget's blank-lines rendering entirely on the key docx rather
+        than reproducing the blank student answer space there too - the
+        question's page-wide `answer_panel_text` (from `.answer-body`) is
+        unaffected and still renders normally, since an instructor may place
+        a model answer there even though it isn't tied to this specific
+        widget. Always `False` for every other kind.
+    statements : list[list[ContentNode]]
+        For `matching` only: each statement's rich content, in on-page order
+        (one `<select>` dropdown per statement in the live UI, replaced here
+        with a blank/filled-in label in print form - see
+        `pl2docx.element_renderer`). Always empty for other kinds.
+    match_options : list[list[ContentNode]]
+        For `matching` only: each answer option's rich content, in on-page
+        (counter) order. Always empty for other kinds.
+    counter_type : str or None
+        For `matching` only: PL's own `counter-type` attribute value
+        (`"lower-alpha"`/`"upper-alpha"`/`"decimal"`/`"full-text"`), read off
+        the rendered `--pl-matching-counter-type` CSS custom property -
+        controls how `match_options` are labeled when printed. `None` for
+        other kinds, or if unparseable (callers should default to
+        `"lower-alpha"`, PL's own `COUNTER_TYPE_DEFAULT`).
+    correct_labels : list[str or None]
+        For `matching` only: parallel to `statements` - each statement's
+        correct option, as a display label already formatted per
+        `counter_type` (e.g. `"1"`/`"a"`/`"A"`), when known. `None` per-entry
+        when this widget was parsed from blank HTML (no correct-answer data
+        available yet) or a given statement's match couldn't be resolved.
+        Always empty for other kinds.
+    blocks : list[list[ContentNode]]
+        For `order_blocks` only: each pool block's rich content (including
+        any distractor blocks - PL shows these in the same pool, per the
+        user's confirmed choice to print them like any other block), in
+        on-page pool order. Always empty for other kinds.
+    correct_order : list[int] or None
+        For `order_blocks` only: indices into `blocks`, in the correct
+        answer sequence (distractors excluded - this list's length is the
+        number of blanks to print). `None` when parsed from blank HTML (no
+        correct-answer data available yet) or the correct order couldn't be
+        resolved from the key HTML's answer panel. Always `None` for other
+        kinds.
     """
 
     kind: str
@@ -444,6 +489,13 @@ class Widget:
     label: list[ContentNode] | None = None
     suffix: list[ContentNode] | None = None
     width_chars: int | None = None
+    suppress_in_key: bool = False
+    statements: list[list[ContentNode]] = field(default_factory=list)
+    match_options: list[list[ContentNode]] = field(default_factory=list)
+    counter_type: str | None = None
+    correct_labels: list[str | None] = field(default_factory=list)
+    blocks: list[list[ContentNode]] = field(default_factory=list)
+    correct_order: list[int] | None = None
 
 
 @dataclass(frozen=True)
@@ -514,7 +566,10 @@ class ParsedQuestion:
 
 
 def parse_instance_question_html(
-    html: str, additional_fill_in_tags: Iterable[str] = ()
+    html: str,
+    additional_fill_in_tags: Iterable[str] = (),
+    additional_fill_in_class_prefixes: dict[str, str] | None = None,
+    is_answer_key: bool = False,
 ) -> ParsedQuestion:
     """Parse one fetched `instance_question` page into a `ParsedQuestion`.
 
@@ -533,7 +588,43 @@ def parse_instance_question_html(
         Detected using the exact same tag-name-derived pattern as every built-in
         fill-in element (see this module's docstring); an element not actually
         following that markup convention (e.g. `pl-big-o-input`) simply won't be
-        detected, not a hard error.
+        detected unless a `class_prefix` override is also supplied via
+        `additional_fill_in_class_prefixes`.
+    additional_fill_in_class_prefixes : dict[str, str] or None
+        Maps an `additional_fill_in_tags` entry to an override base string used
+        in place of the tag itself when building `_add_fill_in_groups`'s
+        `{base}-input`/`{base}-multiline` detection pattern — lets a
+        non-conforming element (e.g. `pl-big-o-input`, whose real class is
+        `big-o-input-input`, missing the usual `pl-` prefix) still be detected
+        via the same generic mechanism instead of needing bespoke code (see
+        `pl2docx.element_config.additional_fill_in_class_prefixes`). Tags not
+        present in this dict fall back to using the tag itself as the base,
+        unchanged from before this parameter existed.
+    is_answer_key : bool
+        Whether `html` is answer-key (closed-instance, `showCorrectAnswer`)
+        HTML rather than a blank student copy. Consumed two ways: (1)
+        `rich_text_editor` widgets (see `Widget.suppress_in_key`); (2) gates
+        whether the page's "Variant" answer JSON (`_extract_true_answer`) is
+        used to resolve `multiple_choice`/`checkbox`'s `correct_option_indices`
+        or `matching`'s `correct_labels` at all. **Confirmed real bug, fixed
+        the same session `is_answer_key` was added**: that JSON panel is
+        server-rendered for staff-role viewers *regardless* of
+        `showCorrectAnswer` (see `_extract_true_answer`'s own docstring) - so
+        without this gate, a blank/open-instance parse would still resolve
+        real correct-answer data, and `bold_correct` (on by default) would
+        bold the correct MC/checkbox option, or fill in a matching statement's
+        correct label, on the *student's own blank copy* - a real
+        answer leak, not a hypothetical one (caught rendering real fetched
+        HTML against a live PL server, not a unit-test-only finding).
+        `answer_panel_text` (the whole-page value) is unaffected either way -
+        `.answer-body` is genuinely present-but-empty on a real blank parse,
+        so it already resolves to `None` with no gating needed. `matching`'s
+        HTML-scrape fallback (`.pl-matching-answer`) and `order_blocks`'
+        (`.pl-order-blocks-answer-container`) are *also* gated here, as
+        defense-in-depth against a caller mistakenly passing key HTML with
+        `is_answer_key` left at its default - not because real blank HTML
+        would ever contain that content (it wouldn't, by the same "present
+        but empty" logic `answer_panel_text` relies on).
 
     Returns
     -------
@@ -563,14 +654,29 @@ def parse_instance_question_html(
 
     answer_body = soup.find(class_="answer-body")
     answer_panel_text = _extract_answer_panel_text(answer_body)
-    true_answer = _extract_true_answer(soup)
+    # Gated on is_answer_key: the "Variant" JSON panel this feeds is present
+    # for staff-role viewers regardless of showCorrectAnswer (see
+    # _extract_true_answer's docstring) - resolving it unconditionally would
+    # leak real correct-answer data into a blank-copy parse. See this
+    # function's own is_answer_key docstring for the full story.
+    true_answer = _extract_true_answer(soup) if is_answer_key else None
     points = _extract_points(soup)
     points_numeric = _parse_points_numeric(points)
     qid = _extract_qid(soup)
 
-    groups = _find_widget_groups(question_body, additional_fill_in_tags)
-    widgets = [_build_widget(group, true_answer) for group in groups]
-    prompt_segments = _extract_prompt_segments(question_body, groups, additional_fill_in_tags)
+    class_prefixes = additional_fill_in_class_prefixes or {}
+    groups = _find_widget_groups(question_body, additional_fill_in_tags, class_prefixes)
+    # See is_answer_key's docstring: widget-level correct-answer resolution
+    # (matching/order_blocks' answer_body-based scrape) is gated the same way
+    # true_answer already is - defense-in-depth, not because real blank HTML
+    # would ever populate .answer-body with this content itself.
+    widget_answer_body = answer_body if is_answer_key else None
+    widgets = [_build_widget(group, true_answer, widget_answer_body) for group in groups]
+    if is_answer_key:
+        widgets = [
+            replace(w, suppress_in_key=True) if w.kind == "rich_text_editor" else w for w in widgets
+        ]
+    prompt_segments = _extract_prompt_segments(question_body, groups, additional_fill_in_tags, class_prefixes)
 
     return ParsedQuestion(
         title=title,
@@ -1076,7 +1182,9 @@ class _WidgetGroup:
 
 
 def _find_widget_groups(
-    question_body: Tag, additional_fill_in_tags: Iterable[str] = ()
+    question_body: Tag,
+    additional_fill_in_tags: Iterable[str] = (),
+    additional_fill_in_class_prefixes: dict[str, str] | None = None,
 ) -> list[_WidgetGroup]:
     """Group this page's recognized inputs into one `_WidgetGroup` per (kind, name).
 
@@ -1085,6 +1193,7 @@ def _find_widget_groups(
     `find_all` (as done here for simplicity) interleaves kinds incorrectly on a
     compound page.
     """
+    class_prefixes = additional_fill_in_class_prefixes or {}
     groups: dict[tuple[str, str], _WidgetGroup] = {}
 
     def add(kind: str, name: str, container: Tag, is_dropdown: bool = False) -> None:
@@ -1102,6 +1211,8 @@ def _find_widget_groups(
         add("multiple_choice", radio.get("name", ""), container)
 
     for select in question_body.find_all("select"):
+        if select.find_parent("div", class_=re.compile(r"^pl-matching-container\b")) is not None:
+            continue  # a pl-matching statement's own <select> - handled by matching detection below
         container = (
             select.find_parent(class_=re.compile(r"pl-multiple-choice-dropdown")) or select
         )
@@ -1110,7 +1221,28 @@ def _find_widget_groups(
     for kind, tag in _BUILTIN_FILL_IN_TAGS.items():
         _add_fill_in_groups(question_body, tag, kind, add)
     for tag in additional_fill_in_tags:
-        _add_fill_in_groups(question_body, tag, tag, add)
+        _add_fill_in_groups(question_body, class_prefixes.get(tag, tag), tag, add)
+
+    for container in question_body.find_all("div", class_="pl-rich-text-editor-container"):
+        hidden_input = container.find("input", attrs={"type": "hidden"})
+        name = hidden_input.get("name", "") if hidden_input is not None else ""
+        add("rich_text_editor", name, container)
+
+    for container in question_body.find_all("div", class_=re.compile(r"^pl-matching-container\b")):
+        select = container.find("select")
+        name = select.get("name", "") if select is not None else ""
+        add("matching", name, container)
+
+    for pool in question_body.find_all("ul", id=re.compile(r"^order-blocks-options-")):
+        container = pool
+        ancestor = pool.parent
+        while ancestor is not None and isinstance(ancestor, Tag):
+            if ancestor.find("ul", id=re.compile(r"^order-blocks-dropzone-")) is not None:
+                container = ancestor
+                break
+            ancestor = ancestor.parent
+        name = pool.get("id", "")
+        add("order_blocks", name, container)
 
     order_index = {id(tag): i for i, tag in enumerate(question_body.descendants) if isinstance(tag, Tag)}
     ordered_keys = sorted(
@@ -1120,8 +1252,8 @@ def _find_widget_groups(
     return [groups[key] for key in ordered_keys]
 
 
-def _add_fill_in_groups(question_body: Tag, tag: str, kind: str, add) -> None:
-    """Detect one fill-in-type element's widgets by its tag-name-derived class pattern.
+def _add_fill_in_groups(question_body: Tag, class_base: str, kind: str, add) -> None:
+    """Detect one fill-in-type element's widgets by its class-pattern base string.
 
     Confirmed shared convention across every built-in fill-in element (and
     `pl-scinum-input`, a course-specific `additional-elements` element following
@@ -1130,6 +1262,12 @@ def _add_fill_in_groups(question_body: Tag, tag: str, kind: str, add) -> None:
     needs no per-element knowledge beyond the tag name string itself, which is
     exactly what lets `additional_fill_in_tags` support arbitrary configured
     elements without any course-specific string appearing in this module.
+    `class_base` is normally just `kind`/the tag itself, but a caller may pass a
+    different base string (see `additional_fill_in_class_prefixes` on
+    `parse_instance_question_html`) for an element that doesn't follow the
+    convention verbatim — confirmed real case: `pl-big-o-input`'s `<input>` class
+    is `big-o-input-input`, missing the usual `pl-` prefix, matched by passing
+    `class_base="big-o-input"` instead of the tag `"pl-big-o-input"`.
 
     Restricting the search to `<input>`/`<textarea>` tag names specifically (not
     just any tag carrying a matching class) is deliberate, not incidental: it's
@@ -1138,13 +1276,13 @@ def _add_fill_in_groups(question_body: Tag, tag: str, kind: str, add) -> None:
     `pl-symbolic-input-input` class but isn't a real, statically-populated input —
     see this module's docstring.
     """
-    pattern = re.compile(rf"^{re.escape(tag)}-(input|multiline)$")
+    pattern = re.compile(rf"^{re.escape(class_base)}-(input|multiline)$")
     for input_tag in question_body.find_all(["input", "textarea"], class_=pattern):
         container = input_tag.find_parent(class_=re.compile(r"^input-group\b")) or input_tag
         add(kind, input_tag.get("name", ""), container)
 
 
-def _build_widget(group: _WidgetGroup, true_answer: dict | None) -> Widget:
+def _build_widget(group: _WidgetGroup, true_answer: dict | None, answer_body: Tag | None) -> Widget:
     if group.kind in ("multiple_choice", "checkbox"):
         options, option_keys = _extract_group_options(group)
         return Widget(
@@ -1156,8 +1294,244 @@ def _build_widget(group: _WidgetGroup, true_answer: dict | None) -> Widget:
             is_inline=_extract_group_is_inline(group),
             is_dropdown=group.is_dropdown,
         )
+    if group.kind == "rich_text_editor":
+        return Widget(kind=group.kind, name=group.name)
+    if group.kind == "matching":
+        return _build_matching_widget(group, true_answer, answer_body)
+    if group.kind == "order_blocks":
+        return _build_order_blocks_widget(group, answer_body)
     label, suffix, width_chars = _extract_group_label_suffix_width(group)
     return Widget(kind=group.kind, name=group.name, label=label, suffix=suffix, width_chars=width_chars)
+
+
+_COUNTER_TYPE_DEFAULT = "lower-alpha"
+
+
+def format_counter(index: int, counter_type: str | None) -> str:
+    """Format a 0-based index as PL's own `counter-type` display would, e.g. `"a"`/`"A"`/`"1"`.
+
+    Parameters
+    ----------
+    index : int
+        0-based position among the counted items (a `pl-matching` option, or
+        a `pl-order-blocks` pool block).
+    counter_type : str or None
+        `"lower-alpha"`/`"upper-alpha"`/`"decimal"`/`"full-text"` (PL's own
+        `pl-matching` values — reused verbatim for `pl-order-blocks`' pool
+        lettering too, which always uses `"upper-alpha"`, PL's element has no
+        analogous attribute of its own). `None` treated as
+        `_COUNTER_TYPE_DEFAULT` (`"lower-alpha"`, PL's own default).
+
+    Returns
+    -------
+    str
+        The bare counter text, e.g. `"a"`, `"A"`, `"1"` — never includes a
+        trailing `"."` or other punctuation; callers append that themselves.
+        `""` for `"full-text"` (no counter is shown at all, matching PL's own
+        `no_counters` behavior).
+
+    Raises
+    ------
+    IndexError
+        If `index` is outside the 26-letter range for `lower-alpha`/`upper-alpha`
+        (no fixture/target question in this project has that many items).
+    """
+    kind = counter_type or _COUNTER_TYPE_DEFAULT
+    if kind == "upper-alpha":
+        return string.ascii_uppercase[index]
+    if kind == "decimal":
+        return str(index + 1)
+    if kind == "full-text":
+        return ""
+    return string.ascii_lowercase[index]
+
+
+def _build_matching_widget(group: _WidgetGroup, true_answer: dict | None, answer_body: Tag | None) -> Widget:
+    """Build a `matching`-kind `Widget` from its `.pl-matching-container`.
+
+    Statement/option content is always extracted from the widget's own
+    container (present, disabled, in both blank and key HTML alike).
+    `correct_labels` is resolved two ways, JSON-first per the user's
+    preference: primarily via PL's own `data["correct_answers"][name]` ->
+    `true_answer[name]` pathway (the same mechanism `_extract_correct_option_indices`
+    already uses for `pl-multiple-choice`/`pl-checkbox`), falling back to
+    scraping PL's own rendered `.pl-matching-answer` answer-panel HTML (only
+    present once `showCorrectAnswer` is true) when the JSON route doesn't
+    resolve — e.g. if `pl-matching` doesn't expose a `name`-keyed entry in
+    that JSON the same way MC/checkbox do (unconfirmed at the time this was
+    written; verify against a real fetched Variant JSON payload).
+    """
+    container = group.containers[0]
+    # Confirmed against real fetched HTML: each statement's own <select> is named
+    # "{base_name}-dropdown-{index}" (a distinct name per statement, needed since
+    # PL submits each dropdown as its own form field), but the Variant JSON's
+    # top-level key for the whole pl-matching element is just "{base_name}" (no
+    # suffix) - group.name (the *first* statement's select name, from
+    # _find_widget_groups) must have that suffix stripped before it's usable as
+    # both this Widget's own display name and the true_answer lookup key, or the
+    # JSON route silently finds nothing and always falls through to the HTML
+    # scrape fallback below (confirmed the hard way against a real question).
+    name = re.sub(r"-dropdown-\d+$", "", group.name)
+    statements: list[list[ContentNode]] = []
+    for statement_text in container.find_all(class_="pl-matching-statement-text"):
+        statements.append(_normalize_nodes(_walk_content(statement_text)))  # type: ignore[arg-type]
+
+    match_options: list[list[ContentNode]] = []
+    for option in container.find_all("li", class_="pl-matching-option"):
+        content = option.find(id=re.compile(r"-content$")) or option
+        match_options.append(_normalize_nodes(_walk_content(content)))  # type: ignore[arg-type]
+
+    counter_type = None
+    options_block = container.find(class_="pl-matching-options")
+    if options_block is not None:
+        li = options_block.find("li")
+        if li is not None:
+            style = li.get("style", "")
+            m = re.search(r"--pl-matching-counter-type:\s*([\w-]+)", style)
+            if m:
+                counter_type = m.group(1)
+
+    correct_labels = _extract_matching_correct_labels_from_json(name, true_answer, counter_type)
+    if correct_labels is None:
+        correct_labels = _extract_matching_correct_labels_from_html(answer_body, len(statements))
+    if correct_labels is None:
+        correct_labels = [None] * len(statements)
+
+    return Widget(
+        kind="matching",
+        name=name,
+        statements=statements,
+        match_options=match_options,
+        counter_type=counter_type,
+        correct_labels=correct_labels,
+    )
+
+
+def _extract_matching_correct_labels_from_json(
+    name: str, true_answer: dict | None, counter_type: str | None
+) -> list[str | None] | None:
+    """Attempt to resolve `pl-matching`'s correct answers from the Variant JSON.
+
+    Returns
+    -------
+    list[str or None] or None
+        One formatted counter label per statement (matching `format_counter`'s
+        output), or `None` (not `[]`) if `true_answer` has no usable entry for
+        `name` at all — signals the caller to fall back to HTML scraping,
+        distinct from "resolved, but this particular statement's match is
+        unknown" (which would be a per-entry `None` inside the returned list).
+
+    Notes
+    -----
+    PL's `pl-matching.py` stores `data["correct_answers"][name] = correct_matches`,
+    a list of per-statement correct option indices (one entry per statement, in
+    statement order) — the same `data["correct_answers"][name]` pathway
+    `_extract_true_answer`'s JSON already exposes for `pl-multiple-choice`/
+    `pl-checkbox`. This has not been confirmed against a real fetched Variant
+    JSON payload for `pl-matching` specifically (unlike the MC/checkbox case,
+    which was confirmed against real fetched HTML) — implemented defensively,
+    returning `None` for any shape that doesn't parse as a plain list of
+    integers, so the HTML-scraping fallback always has a chance to run.
+    """
+    if not true_answer or name not in true_answer:
+        return None
+    entry = true_answer[name]
+    if not isinstance(entry, list) or not all(isinstance(x, int) for x in entry):
+        return None
+    return [format_counter(idx, counter_type) if idx is not None else None for idx in entry]
+
+
+def _extract_matching_correct_labels_from_html(
+    answer_body: Tag | None, statement_count: int
+) -> list[str | None] | None:
+    """Fallback: scrape correct matches directly from PL's rendered `.pl-matching-answer` HTML.
+
+    Parameters
+    ----------
+    answer_body : Tag or None
+        The page's `.answer-body` container (present but empty in blank HTML,
+        populated once `showCorrectAnswer` is true).
+    statement_count : int
+        This widget's own statement count, used only to decide whether a
+        `.pl-matching-answer` scrape found a plausible one-per-statement match
+        (a sanity check, not a hard requirement).
+
+    Returns
+    -------
+    list[str or None] or None
+        `None` if no `.pl-matching-answer` blocks were found at all (blank
+        HTML, or the JSON route already resolved this and this fallback
+        wasn't needed). Page-wide, not per-widget-name-scoped — see this
+        module's `Widget.correct_labels` docstring for the known limit this
+        creates for multiple same-page `pl-matching` widgets.
+    """
+    if answer_body is None:
+        return None
+    answers = answer_body.find_all(class_="pl-matching-answer")
+    if not answers:
+        return None
+    labels: list[str | None] = []
+    for answer in answers:
+        strong = answer.find("strong")
+        if strong is None:
+            labels.append(None)
+            continue
+        # PL's own rendered <strong> text already includes the trailing "."
+        # (confirmed against real fetched HTML: "<strong>b.</strong>"), unlike
+        # the JSON route's bare format_counter() output ("b") - strip it here
+        # so both routes return the same bare-label shape, since the renderer
+        # always appends its own "." after whichever label it's given.
+        labels.append(strong.get_text(strip=True).rstrip("."))
+    return labels
+
+
+def _build_order_blocks_widget(group: _WidgetGroup, answer_body: Tag | None) -> Widget:
+    """Build an `order_blocks`-kind `Widget` from its pool `<ul>` + wrapping container.
+
+    Pool block content (including distractors, per the user's confirmed
+    choice) is always extracted from the widget's own pool `<ul>` (present in
+    both blank and key HTML). `correct_order` is only resolvable from key
+    HTML's `.pl-order-blocks-answer-container` (a plain, static, correctly-ordered
+    `<li>` list PL renders once `showCorrectAnswer` is true) — the correct
+    order is computed inside the element's own Python controller and is never
+    present in the Variant JSON at all, so (unlike `pl-matching`) this
+    intentionally never attempts a JSON-based route. Matched to pool blocks by
+    content equality (best-effort — falls back to `None` if a match can't be
+    resolved for every answer-panel block).
+    """
+    pool = group.containers[0].find("ul", id=re.compile(r"^order-blocks-options-"))
+    if pool is None:
+        pool = group.containers[0]
+    blocks: list[list[ContentNode]] = []
+    for li in pool.find_all("li", class_="pl-order-block", recursive=False) or pool.find_all(
+        "li", class_="pl-order-block"
+    ):
+        content = li.find(class_="pl-order-block-content") or li
+        blocks.append(_normalize_nodes(_walk_content(content)))  # type: ignore[arg-type]
+
+    correct_order = _extract_order_blocks_correct_order(answer_body, blocks)
+
+    return Widget(kind="order_blocks", name=group.name, blocks=blocks, correct_order=correct_order)
+
+
+def _extract_order_blocks_correct_order(
+    answer_body: Tag | None, blocks: list[list[ContentNode]]
+) -> list[int] | None:
+    if answer_body is None:
+        return None
+    answer_container = answer_body.find(class_="pl-order-blocks-answer-container")
+    if answer_container is None:
+        return None
+    block_texts = [plain_text(b) for b in blocks]
+    order: list[int] = []
+    for li in answer_container.find_all("li", class_="pl-order-block"):
+        content = li.find(class_="pl-order-block-content") or li
+        text = plain_text(_normalize_nodes(_walk_content(content)))  # type: ignore[arg-type]
+        try:
+            order.append(block_texts.index(text))
+        except ValueError:
+            return None
+    return order or None
 
 
 def _extract_group_options(
@@ -1320,7 +1694,10 @@ def _extract_correct_option_indices(
 
 
 def _extract_prompt_segments(
-    question_body: Tag, groups: list[_WidgetGroup], additional_fill_in_tags: Iterable[str] = ()
+    question_body: Tag,
+    groups: list[_WidgetGroup],
+    additional_fill_in_tags: Iterable[str] = (),
+    additional_fill_in_class_prefixes: dict[str, str] | None = None,
 ) -> list[list[ContentNode]]:
     """Split the prompt's rich content at each widget's source position.
 
@@ -1328,16 +1705,16 @@ def _extract_prompt_segments(
     mutating the tree used for the rest of parsing) so this can safely walk
     around each widget's first container (replacing it with a `_WidgetMarker`
     node instead of descending into it) and skip the rest. Detection is a
-    pure function of the HTML (given the same `additional_fill_in_tags`), so
-    `_find_widget_groups` on the copy produces groups in the same order/count as
-    `groups` — this is an internal invariant of this module, not something calling
-    code needs to reason about.
+    pure function of the HTML (given the same `additional_fill_in_tags`/
+    `additional_fill_in_class_prefixes`), so `_find_widget_groups` on the copy
+    produces groups in the same order/count as `groups` — this is an internal
+    invariant of this module, not something calling code needs to reason about.
     """
     if not groups:
         return [_normalize_nodes(_walk_content(question_body))]  # type: ignore[list-item]
 
     body_copy = BeautifulSoup(str(question_body), "html.parser")
-    copy_groups = _find_widget_groups(body_copy, additional_fill_in_tags)
+    copy_groups = _find_widget_groups(body_copy, additional_fill_in_tags, additional_fill_in_class_prefixes)
 
     marker_by_id: dict[int, int] = {}
     for idx, copy_group in enumerate(copy_groups):
