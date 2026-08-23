@@ -99,7 +99,26 @@ class TextRun:
 
 @dataclass(frozen=True)
 class ParagraphBreak:
-    """A paragraph boundary in the source HTML (`<p>`/`<br>`/list-item edges)."""
+    """A paragraph boundary in the source HTML (`<p>`/`<br>`/list-item edges).
+
+    Parameters
+    ----------
+    hard : bool
+        Whether this break marks a real block-tag (`<p>`) boundary, as
+        opposed to an incidental one (`<br>`, or one synthesized to separate
+        a `<li>` from its neighbor). Only used by the renderer's in-list-item
+        soft-line-break handling: a `<p>`-to-`<p>` transition *within one
+        `<li>`* needs a full blank line (two soft breaks) to visually read as
+        separate paragraphs, since being inside a list item means it can't
+        fall back on a real new Word paragraph (with the template's own
+        paragraph spacing) the way the same transition would outside a list.
+        `_normalize_nodes`'s consecutive-`ParagraphBreak` collapsing
+        propagates `hard=True` forward when merging (so it survives being
+        deduplicated down to one node), but never fabricates it - a `hard`
+        break always traces back to a real `<p>` tag.
+    """
+
+    hard: bool = False
 
 
 @dataclass(frozen=True)
@@ -1088,13 +1107,13 @@ def _walk_into(
 
     is_block = name in _BLOCK_TAGS
     if is_block and out:
-        out.append(ParagraphBreak())
+        out.append(ParagraphBreak(hard=True))
 
     for child in node.children:
         _walk_into(child, out, marker_by_id, child_bold, child_italic, child_underline, child_color)
 
     if is_block:
-        out.append(ParagraphBreak())
+        out.append(ParagraphBreak(hard=True))
 
 
 def _walk_li(
@@ -1206,6 +1225,13 @@ def _normalize_nodes(nodes: list[ContentNode | _WidgetMarker]) -> list[ContentNo
                 merged.append(node)
         elif isinstance(node, ParagraphBreak):
             if merged and isinstance(merged[-1], ParagraphBreak):
+                # Collapsed to one node, but `hard` (a real <p> boundary, not
+                # just incidental formatting) must survive the merge even if
+                # only one of the two contributing breaks was hard - see
+                # ParagraphBreak's own docstring for why the renderer needs
+                # this distinction inside a list item.
+                if node.hard and not merged[-1].hard:
+                    merged[-1] = ParagraphBreak(hard=True)
                 continue
             merged.append(node)
         else:
@@ -1244,6 +1270,8 @@ def _normalize_nodes(nodes: list[ContentNode | _WidgetMarker]) -> list[ContentNo
     cleaned = []
     for node in de_spaced:
         if isinstance(node, ParagraphBreak) and cleaned and isinstance(cleaned[-1], ParagraphBreak):
+            if node.hard and not cleaned[-1].hard:
+                cleaned[-1] = ParagraphBreak(hard=True)
             continue
         cleaned.append(node)
 
@@ -1255,6 +1283,49 @@ def _normalize_nodes(nodes: list[ContentNode | _WidgetMarker]) -> list[ContentNo
         # immediately before/after a widget that's itself the sole content
         # of a <li>).
         return isinstance(n, ParagraphBreak) or (isinstance(n, TextRun) and n.text.strip() == "")
+
+    # Same trim, applied *inside* each <li>'s own boundaries too - not just
+    # the whole segment's outer edges. A <li> whose content starts (or ends)
+    # with a real block tag (<p>) contributes its own leading (or trailing)
+    # ParagraphBreak (see _walk_into's is_block handling) - correct at the
+    # top level (a real new Word paragraph), but wrong immediately inside a
+    # <li>: _render_nodes_into_subdoc renders a ParagraphBreak while inside a
+    # list item as a soft line break within the *same* paragraph, so an
+    # untrimmed one there renders as a visible blank line before the item's
+    # content even starts (or after it ends, before the next item's own
+    # marker) - confirmed real bug against this course's
+    # mystery-liquid-density-uncertainty answer panel, where every <li> wraps
+    # its content in <p>. Done here (post-whitespace-collapse), not inside
+    # `_walk_li` itself, because at that point a stray whitespace-only text
+    # node between `<li>` and `<p>` (real, confirmed source indentation)
+    # still sits between ListItemStart and the block's own ParagraphBreak,
+    # defeating a naive "is the very next node a ParagraphBreak" check.
+    i = 0
+    while i < len(cleaned) - 1:
+        if isinstance(cleaned[i], ListItemStart) and _is_boundary_junk(cleaned[i + 1]):
+            del cleaned[i + 1]
+            continue
+        i += 1
+    i = 1
+    while i < len(cleaned):
+        if isinstance(cleaned[i], ListItemEnd) and _is_boundary_junk(cleaned[i - 1]):
+            del cleaned[i - 1]
+            i -= 1
+            continue
+        i += 1
+
+    # Same reasoning as the segment-edge lstrip/rstrip below - the block-tag
+    # trim above only removes whole junk *nodes*; a real TextRun immediately
+    # inside a <li> (e.g. "<p>\n    Density is...") still carries the
+    # leading/trailing whitespace from the source's own indentation.
+    for i in range(len(cleaned) - 1):
+        if isinstance(cleaned[i], ListItemStart) and isinstance(cleaned[i + 1], TextRun):
+            t = cleaned[i + 1]
+            cleaned[i + 1] = TextRun(t.text.lstrip(), t.bold, t.italic, t.underline, t.color)
+    for i in range(1, len(cleaned)):
+        if isinstance(cleaned[i], ListItemEnd) and isinstance(cleaned[i - 1], TextRun):
+            t = cleaned[i - 1]
+            cleaned[i - 1] = TextRun(t.text.rstrip(), t.bold, t.italic, t.underline, t.color)
 
     while cleaned and _is_boundary_junk(cleaned[0]):
         cleaned.pop(0)

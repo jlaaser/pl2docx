@@ -711,6 +711,15 @@ def _render_nodes_into_subdoc(
         if isinstance(node, ParagraphBreak):
             if state.get("in_list_item"):
                 state["paragraph"].add_run().add_break()
+                if node.hard:
+                    # A real <p>-to-<p> transition within one <li> needs a
+                    # full blank line to read as separate paragraphs, the
+                    # same way it would outside a list via a real new Word
+                    # paragraph (with the template's own paragraph spacing) -
+                    # unavailable here since staying in one list item means
+                    # staying in one Word paragraph. See ParagraphBreak's own
+                    # docstring.
+                    state["paragraph"].add_run().add_break()
             else:
                 state["paragraph"] = sink.add_paragraph()
             state["needs_break_before_next"] = False
