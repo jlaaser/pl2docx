@@ -58,6 +58,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
@@ -78,6 +79,7 @@ from pl2docx.html_parser import (
     ParagraphBreak,
     ParsedQuestion,
     SvgRef,
+    TableRef,
     TextRun,
     Widget,
     format_counter,
@@ -691,6 +693,12 @@ def _render_nodes_into_subdoc(
     without tab-stop tricks) - skipped, not attempted, per that same
     decision. No break is added before/after when this is already the
     first/last thing in its segment.
+
+    A `TableRef` renders as a real `sink`-level Word table (see
+    `_render_data_table`), not inline paragraph content - `state["paragraph"]`
+    is simply replaced with a fresh trailing paragraph afterward, the same
+    pattern `_render_matching`/`_render_order_blocks_vertical` already use for
+    their own tables.
     """
     for node in nodes:
         if isinstance(node, ListItemStart):
@@ -712,6 +720,10 @@ def _render_nodes_into_subdoc(
                 state["paragraph"].add_run().add_break()
             _render_one_node(state["paragraph"], node, image_base_dir)
             state["needs_break_before_next"] = True
+            continue
+        if isinstance(node, TableRef):
+            state["paragraph"] = _render_data_table(sink, node, image_base_dir)
+            state["needs_break_before_next"] = False
             continue
         if state.pop("needs_break_before_next", False):
             state["paragraph"].add_run().add_break()
@@ -1147,6 +1159,26 @@ def _render_rich_text_editor(subdoc, state: dict, widget: Widget, prefs) -> None
     state["paragraph"] = subdoc.add_paragraph()
 
 
+def _clear_table_borders(table) -> None:
+    """Set every one of `table`'s default borders (outer + inside) to none.
+
+    Shared starting point for every table style this module builds - each
+    caller then adds back only the specific border lines it actually wants
+    (if any) at the cell level, since `<w:tcBorders>` on an individual cell
+    overrides this table-level default.
+    """
+    tbl_pr = table._tbl.tblPr
+    borders = OxmlElement("w:tblBorders")
+    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        el = OxmlElement(f"w:{edge}")
+        el.set(qn("w:val"), "none")
+        el.set(qn("w:sz"), "0")
+        el.set(qn("w:space"), "0")
+        el.set(qn("w:color"), "auto")
+        borders.append(el)
+    tbl_pr.append(borders)
+
+
 def _style_two_column_table(table) -> None:
     """Style `table` as a borderless 2-column layout table with extra top cell margin.
 
@@ -1159,22 +1191,90 @@ def _style_two_column_table(table) -> None:
     piece of real reuse between the two elements' otherwise distinct table
     shapes.
     """
+    _clear_table_borders(table)
     tbl_pr = table._tbl.tblPr
-    borders = OxmlElement("w:tblBorders")
-    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
-        el = OxmlElement(f"w:{edge}")
-        el.set(qn("w:val"), "none")
-        el.set(qn("w:sz"), "0")
-        el.set(qn("w:space"), "0")
-        el.set(qn("w:color"), "auto")
-        borders.append(el)
-    tbl_pr.append(borders)
     cell_mar = OxmlElement("w:tblCellMar")
     top = OxmlElement("w:top")
     top.set(qn("w:w"), "144")
     top.set(qn("w:type"), "dxa")
     cell_mar.append(top)
     tbl_pr.append(cell_mar)
+
+
+def _set_cell_border(cell, edge: str, sz: str = "4", color: str = "000000") -> None:
+    """Add a single-line `<w:tcBorders>` border to `cell`'s given `edge` ("top"/"bottom"/...).
+
+    Cell-level borders override the table-level `<w:tblBorders>` default
+    `_clear_table_borders` sets, so this is how `_apply_data_table_rules`
+    draws just the specific header/footer lines it wants without any of the
+    table's other borders reappearing.
+    """
+    tc_pr = cell._tc.get_or_add_tcPr()
+    tc_borders = tc_pr.find(qn("w:tcBorders"))
+    if tc_borders is None:
+        tc_borders = OxmlElement("w:tcBorders")
+        tc_pr.append(tc_borders)
+    el = tc_borders.find(qn(f"w:{edge}"))
+    if el is None:
+        el = OxmlElement(f"w:{edge}")
+        tc_borders.append(el)
+    el.set(qn("w:val"), "single")
+    el.set(qn("w:sz"), sz)
+    el.set(qn("w:space"), "0")
+    el.set(qn("w:color"), color)
+
+
+def _apply_data_table_rules(table, n_header_rows: int) -> None:
+    """Draw a "booktabs"-style rule set: line above the header, below it, and below the table.
+
+    Matches the user's reference image for `pl2docx-misc-test`'s
+    `intro/extended/mystery-liquid-density-uncertainty` table: a line above
+    the first (header) row, a line below the last header row, and a line
+    below the table's last row - no vertical rules, no lines between
+    ordinary body rows. When `n_header_rows` is 0 (no header detected), only
+    the top-of-table and bottom-of-table rules are drawn.
+    """
+    rows = table.rows
+    n_rows = len(rows)
+    if n_rows == 0:
+        return
+    for cell in rows[0].cells:
+        _set_cell_border(cell, "top")
+    header_end = min(n_header_rows, n_rows) - 1
+    if header_end >= 0:
+        for cell in rows[header_end].cells:
+            _set_cell_border(cell, "bottom")
+    for cell in rows[-1].cells:
+        _set_cell_border(cell, "bottom")
+
+
+def _render_data_table(sink, node: TableRef, image_base_dir: Path | None):
+    """Render `node` as a real Word table and return a fresh trailing paragraph.
+
+    Each cell is centered; header-row cells are additionally bolded. Border
+    rules are drawn by `_apply_data_table_rules`. Column count is the widest
+    row's cell count - a short row (malformed source table) simply leaves its
+    remaining cells blank rather than raising, matching this module's general
+    best-effort philosophy for imperfect source markup.
+    """
+    all_rows = [*node.header_rows, *node.body_rows]
+    n_cols = max((len(row) for row in all_rows), default=1)
+    n_rows = max(len(all_rows), 1)
+    table = sink.add_table(rows=n_rows, cols=n_cols)
+    _clear_table_borders(table)
+
+    for r, row_cells in enumerate(all_rows):
+        is_header = r < len(node.header_rows)
+        for c, cell_nodes in enumerate(row_cells):
+            paragraph = table.cell(r, c).paragraphs[0]
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            runs = _render_nodes_to_paragraph(paragraph, cell_nodes, image_base_dir)
+            if is_header:
+                for run in runs:
+                    run.bold = True
+
+    _apply_data_table_rules(table, len(node.header_rows))
+    return sink.add_paragraph()
 
 
 def _apply_block_indent(paragraph, indent_inches: float) -> None:

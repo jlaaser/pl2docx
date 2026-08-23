@@ -52,6 +52,16 @@ from pathlib import Path
 _DEFAULT_FONT_SIZE_PT = 11
 _DEFAULT_DPI = 600
 _PREVIEW_BORDER_PT = 1
+#: Total desired vertical whitespace above/below a display-mode equation's own
+#: ink, in points - confirmed by the user (2026-08-22) that display-mode
+#: equations were bumping right up against surrounding text, making them
+#: harder to read. `_PREVIEW_BORDER_PT` already contributes 1pt of this
+#: uniformly (all 4 sides, both display and inline); `_DISPLAY_EXTRA_VPAD_PT`
+#: below makes up the rest, added only above/below (never left/right) and
+#: only for display-mode content - inline math (`$...$`) is deliberately left
+#: untouched, per the user's explicit ask.
+_DISPLAY_VERTICAL_MARGIN_PT = 6
+_DISPLAY_EXTRA_VPAD_PT = max(_DISPLAY_VERTICAL_MARGIN_PT - _PREVIEW_BORDER_PT, 0)
 _LATEX_TIMEOUT_S = 20
 _DVIPNG_TIMEOUT_S = 20
 _KPSEWHICH_TIMEOUT_S = 10
@@ -197,7 +207,10 @@ class RenderedMath:
         How far the rendered content extends below the LaTeX baseline, in
         points (e.g. a fraction's denominator or a subscript) - `0.0` for
         content with no descenders. From `dvipng --depth`'s reported pixel
-        count, converted using the same DPI the PNG was rasterized at.
+        count, converted using the same DPI the PNG was rasterized at, plus
+        `_DISPLAY_EXTRA_VPAD_PT` for `display_mode` content (the deliberate
+        extra vertical margin below the equation - dvipng's own reported
+        depth doesn't grow to reflect it, see `render_math_png`'s body).
         Callers should apply this as a downward run-level baseline shift
         (OOXML `<w:position>`, negative = lower) - Word otherwise anchors an
         inline picture's bottom edge to the text baseline, which is wrong
@@ -299,7 +312,41 @@ def render_math_png(
             "xcolor/preview) and dvipng installed."
         )
 
-    content = f"\\[{latex}\\]" if display_mode else f"${latex}$"
+    # display_mode deliberately does NOT use \[...\]/displaymath: that
+    # environment always typesets as an \hbox *to* \linewidth (LaTeX's normal
+    # display-math centering mechanism), and when the equation's actual ink
+    # is wider than \linewidth, the box is "overfull" - its glyphs visibly
+    # protrude past \linewidth, but its own *reported* dimension (what
+    # preview's tightpage bounding box and dvipng's -T tight both trust) is
+    # still exactly \linewidth. The overflowing portion is silently dropped
+    # from the rendered PNG, not just visually cut off in a way cropping
+    # could recover - confirmed by reproducing the user's exact cut-off
+    # equation from millstone-NPs and inspecting the raw dvipng output before
+    # any docx involvement. `\hbox{$\displaystyle ...$}` sidesteps this
+    # entirely: an hbox with no explicit "to <width>" is always natural-width
+    # (never overfull, regardless of how wide), so the full equation is
+    # always captured - "falls off the edge" only in the sense that the
+    # resulting image is simply wider than the page once embedded, which the
+    # user confirmed is fine (unlike silently losing content). `\displaystyle`
+    # preserves display-style sizing (large operators/fractions, real
+    # `\left`/`\right` sizing) that plain inline math wouldn't have.
+    #
+    # The `\vbox{\kern ... \hbox{...} \kern ...}` wrapper is `_DISPLAY_EXTRA_VPAD_PT`'s
+    # delivery mechanism: a `\kern` above/below the equation's own hbox adds genuine
+    # additive vertical whitespace to the vbox's total height/depth (confirmed
+    # empirically - preview's tightpage bounding box does track it). Left/right stay
+    # untouched (no horizontal kern), matching the user's ask for vertical-only
+    # margin. dvipng's reported `depth=` figure does NOT track the added bottom kern
+    # (stays fixed at the inner hbox's own natural depth) - `depth_pt` is adjusted
+    # manually below instead of trusting that measurement for this piece.
+    if display_mode:
+        content = (
+            f"\\vbox{{\\kern {_DISPLAY_EXTRA_VPAD_PT}pt"
+            f"\\hbox{{$\\displaystyle {latex}$}}"
+            f"\\kern {_DISPLAY_EXTRA_VPAD_PT}pt}}"
+        )
+    else:
+        content = f"${latex}$"
     extra_packages = "\n".join(f"\\usepackage{{{pkg}}}" for pkg in _extra_packages)
     source = _SOURCE_TEMPLATE.format(
         size=font_size_pt, border=_PREVIEW_BORDER_PT, extra_packages=extra_packages, content=content
@@ -360,6 +407,13 @@ def render_math_png(
     depth_match = _DEPTH_RE.search(rasterize_result.stdout)
     depth_px = int(depth_match.group(1)) if depth_match else 0
     depth_pt = depth_px / dpi * 72.0
+    if display_mode:
+        # dvipng's own `depth=` figure reflects only the inner hbox's natural
+        # depth - it does not grow when the outer `\vbox`'s trailing `\kern`
+        # pushes the image's bottom edge further below the real baseline (see
+        # the comment above `content`'s construction). Added deterministically
+        # here instead, since we know exactly how much kern we inserted.
+        depth_pt += _DISPLAY_EXTRA_VPAD_PT
     width_in = _png_pixel_width(png_path) / dpi
 
     # Moved into the shared cache dir under a content-hashed name so repeated

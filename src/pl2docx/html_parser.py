@@ -241,6 +241,44 @@ class SvgRef:
     alt: str = "[diagram]"
 
 
+@dataclass(frozen=True)
+class TableRef:
+    """A `<table>`'s content, as header/body rows of rich-content cells.
+
+    Parameters
+    ----------
+    header_rows : list[list[list[ContentNode]]]
+        Rows to render as the table's header - each row a list of cells, each
+        cell its own rich-content node sequence (so formatting/math/images
+        inside a cell still render normally). Empty if the source `<table>`
+        had no `<thead>` and no all-`<th>` first row (see Notes).
+    body_rows : list[list[list[ContentNode]]]
+        Every other row, same cell shape as `header_rows`.
+
+    Notes
+    -----
+    Header-row detection handles two shapes confirmed against real fetched PL
+    pages, not just the well-formed one: a `<thead>` whose header cells are
+    wrapped in one or more real `<tr>` elements (every row inside becomes a
+    header row), *and* a `<thead>` whose `<th>` cells are direct children of
+    `<thead>` itself with no wrapping `<tr>` at all (some of this course's
+    authored tables are inconsistent about including it) - treated as a single
+    implicit header row. A `<table>` with no `<thead>` at all falls back to
+    promoting its first row to the header only if every one of that row's
+    cells is a `<th>` (never for a `<td>`-only or mixed first row).
+
+    Does not assume a widget's `<input>`/`<select>` never appears inside a
+    cell - if one does, its containing tag is still replaced with the usual
+    `_WidgetMarker` internally, but that marker ends up nested inside a cell's
+    node list rather than at the top level `_extract_prompt_segments` splits
+    on, so it will not actually splice out as a real widget. Not handled
+    further since no real course content does this today.
+    """
+
+    header_rows: list[list[list["ContentNode"]]]
+    body_rows: list[list[list["ContentNode"]]]
+
+
 #: One node in a flattened, order-preserving walk of an HTML fragment's content.
 #: Produced by `_walk_content`/consumed by `pl2docx.element_renderer` to render
 #: formatted runs, paragraph breaks, images, and math into a docx Subdoc instead
@@ -248,7 +286,7 @@ class SvgRef:
 #: by the walker starting Phase 4 increment 1, but only rendered as their real
 #: picture/OMML form once increments 2/3 land (element_renderer falls back to
 #: alt text / raw LaTeX text until then).
-ContentNode = TextRun | ParagraphBreak | ListItemStart | ListItemEnd | ImageRef | MathRef | SvgRef
+ContentNode = TextRun | ParagraphBreak | ListItemStart | ListItemEnd | ImageRef | MathRef | SvgRef | TableRef
 
 
 def plain(text: str) -> list[ContentNode]:
@@ -301,6 +339,11 @@ def plain_text(nodes: list[ContentNode]) -> str:
             parts.append(node.latex)
         elif isinstance(node, SvgRef):
             parts.append(node.alt)
+        elif isinstance(node, TableRef):
+            cell_texts = [
+                plain_text(cell) for row in (*node.header_rows, *node.body_rows) for cell in row
+            ]
+            parts.append(" ".join(t for t in cell_texts if t))
         else:
             parts.append(" ")
     # No separator inserted here - each TextRun already carries its own real
@@ -998,6 +1041,17 @@ def _walk_into(
     if name == "br":
         out.append(ParagraphBreak())
         return
+    if name == "table":
+        # Emitted as one whole TableRef node rather than descended into - see
+        # TableRef's own docstring for the header-row detection rules. A
+        # ParagraphBreak on both sides keeps the table from running into
+        # surrounding prose on the same line (tables aren't in _BLOCK_TAGS,
+        # which only covers <p>).
+        if out:
+            out.append(ParagraphBreak())
+        out.append(_build_table_ref(node, marker_by_id))
+        out.append(ParagraphBreak())
+        return
 
     style_color, style_bold = _parse_style_attr(node.get("style"))
     child_bold = bold or name in _BOLD_TAGS or style_bold
@@ -1058,6 +1112,58 @@ def _walk_li(
     for child in node.children:
         _walk_into(child, out, marker_by_id, bold, italic, underline, color)
     out.append(ListItemEnd())
+
+
+def _build_table_ref(table: Tag, marker_by_id: dict[int, int]) -> TableRef:
+    """Extract `table`'s rows into a `TableRef`. See `TableRef`'s own docstring for the rules.
+
+    Parameters
+    ----------
+    table : Tag
+        The `<table>` element itself.
+    marker_by_id : dict[int, int]
+        Passed through to each cell's own `_walk_content` call, same as
+        `_walk_into`'s own parameter - see `TableRef`'s docstring for why a
+        widget nested inside a cell doesn't actually splice out correctly
+        even so.
+
+    Returns
+    -------
+    TableRef
+    """
+
+    def cell_nodes(cell: Tag) -> list[ContentNode]:
+        return _normalize_nodes(_walk_content(cell, marker_by_id))  # type: ignore[return-value]
+
+    def row_cells(row: Tag) -> list[list[ContentNode]]:
+        return [cell_nodes(cell) for cell in row.find_all(["td", "th"], recursive=False)]
+
+    header_rows: list[list[list[ContentNode]]] = []
+    thead = table.find("thead", recursive=False)
+    if thead is not None:
+        header_trs = thead.find_all("tr", recursive=False)
+        if header_trs:
+            header_rows = [row_cells(tr) for tr in header_trs]
+        else:
+            # Real, confirmed case: some of this course's authored tables omit
+            # the <tr> wrapper inside <thead>, leaving <th> as direct children.
+            header_cells = thead.find_all(["td", "th"], recursive=False)
+            if header_cells:
+                header_rows = [[cell_nodes(cell) for cell in header_cells]]
+
+    tbody = table.find("tbody", recursive=False)
+    body_source = tbody if tbody is not None else table
+    body_rows = [row_cells(tr) for tr in body_source.find_all("tr", recursive=False)]
+
+    if not header_rows and body_rows:
+        # No <thead> at all - promote the first row to the header only if
+        # every one of its cells is a <th> (never for a <td>-only/mixed row).
+        first_row_tag = body_source.find("tr", recursive=False)
+        if first_row_tag is not None and not first_row_tag.find_all("td", recursive=False):
+            header_rows = [body_rows[0]]
+            body_rows = body_rows[1:]
+
+    return TableRef(header_rows=header_rows, body_rows=body_rows)
 
 
 def _normalize_nodes(nodes: list[ContentNode | _WidgetMarker]) -> list[ContentNode | _WidgetMarker]:
