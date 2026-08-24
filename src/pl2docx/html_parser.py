@@ -929,6 +929,79 @@ _MATH_SPLIT_RE = re.compile(
     re.DOTALL,
 )
 
+#: A private-use-area character standing in for a `$` that's inside a
+#: `\text{...}`-family command's argument - never appears in real course
+#: content, so it's safe to use as a one-character (position-preserving)
+#: placeholder. See `_mask_nested_text_dollars`.
+_MASKED_DOLLAR = "\uE000"
+
+_TEXT_CMD_RE = re.compile(r"\\(?:text|mbox|textrm|textbf|textit|textsf|texttt)\{")
+
+
+def _mask_nested_text_dollars(text: str) -> str:
+    r"""Replace a `$` inside a `\text{...}`-family argument with a placeholder.
+
+    Parameters
+    ----------
+    text : str
+        Raw text possibly containing LaTeX math delimiters.
+
+    Returns
+    -------
+    str
+        Same length as `text`, same content everywhere except that any `$`
+        found inside a brace-balanced `\text{...}` (or `\mbox`/`\textrm`/...)
+        argument is replaced with `_MASKED_DOLLAR` - a like-for-like,
+        position-preserving substitution (never inserts/removes characters),
+        so a caller matching `_MATH_SPLIT_RE` against this masked copy can
+        still slice the *original* `text` at the match's own start/end
+        indices to recover the real, unmasked content.
+
+    Notes
+    -----
+    Real, confirmed course content nests inline math *inside* `\text{...}`
+    inside an outer math span - e.g. `$\frac{...}{\text{$\mu$m}}=1$`, where
+    `\text{$\mu$m}` is LaTeX's own text-mode-to-math-mode-and-back toggle,
+    used here to typeset a non-italic unit name ("m") next to an italic
+    Greek prefix. `_MATH_SPLIT_RE`'s inline alternative (`\$[^$]*?\$`) has no
+    concept of this nesting - it treats the first bare `$` it meets as the
+    outer span's own closing delimiter, incorrectly splitting one real
+    formula into two broken fragments plus a stray literal-text `\mu` (
+    confirmed against a real pset-01 answer key that reproducibly failed to
+    compile because of exactly this). Masking nested dollars before matching
+    - rather than teaching `_MATH_SPLIT_RE` itself to count brace/mode
+    nesting, which regular expressions can't do in general - sidesteps that
+    without touching the well-tested outer delimiter logic at all.
+    """
+    out: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        m = _TEXT_CMD_RE.match(text, i)
+        if not m:
+            out.append(text[i])
+            i += 1
+            continue
+        out.append(text[i : m.end()])
+        i = m.end()
+        depth = 1
+        while i < n and depth > 0:
+            c = text[i]
+            if c == "\\" and i + 1 < n:
+                out.append(text[i : i + 2])
+                i += 2
+                continue
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+            elif c == "$":
+                out.append(_MASKED_DOLLAR)
+                i += 1
+                continue
+            out.append(c)
+            i += 1
+    return "".join(out)
+
 
 def _split_math_delimiters(
     text: str, bold: bool, italic: bool, underline: bool, color: str | None = None
@@ -964,22 +1037,31 @@ def _split_math_delimiters(
     is not treated as a delimiter at all and passes through as literal text -
     `_MATH_SPLIT_RE` simply fails to match it, rather than this function
     validating balance up front.
+
+    Matches `_MATH_SPLIT_RE` against a `_mask_nested_text_dollars`-masked copy
+    of `text`, not `text` itself, so a real nested `$...$` inside a
+    `\\text{...}` argument doesn't get mistaken for an outer delimiter (see
+    that function's docstring) - but every node's actual content is still
+    sliced out of the original, unmasked `text` at the match's start/end
+    indices (masking is strictly 1-character-for-1-character, so positions
+    in the masked copy and `text` always agree).
     """
     nodes: list[ContentNode] = []
     pos = 0
-    for m in _MATH_SPLIT_RE.finditer(text):
+    masked = _mask_nested_text_dollars(text)
+    for m in _MATH_SPLIT_RE.finditer(masked):
         if m.start() > pos:
             nodes.append(TextRun(text[pos : m.start()], bold, italic, underline, color))
         if m.group(0) == "\\$":
             nodes.append(TextRun("$", bold, italic, underline, color))
         elif m.group("disp_dd") is not None:
-            nodes.append(MathRef(m.group("disp_dd"), display_mode=True))
+            nodes.append(MathRef(text[m.start("disp_dd") : m.end("disp_dd")], display_mode=True))
         elif m.group("disp_br") is not None:
-            nodes.append(MathRef(m.group("disp_br"), display_mode=True))
+            nodes.append(MathRef(text[m.start("disp_br") : m.end("disp_br")], display_mode=True))
         elif m.group("inl_br") is not None:
-            nodes.append(MathRef(m.group("inl_br"), display_mode=False))
+            nodes.append(MathRef(text[m.start("inl_br") : m.end("inl_br")], display_mode=False))
         elif m.group("inl_d") is not None:
-            nodes.append(MathRef(m.group("inl_d"), display_mode=False))
+            nodes.append(MathRef(text[m.start("inl_d") : m.end("inl_d")], display_mode=False))
         pos = m.end()
     if pos < len(text):
         nodes.append(TextRun(text[pos:], bold, italic, underline, color))
