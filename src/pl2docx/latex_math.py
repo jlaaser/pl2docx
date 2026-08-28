@@ -94,6 +94,102 @@ _SOURCE_TEMPLATE = r"""\documentclass[{size}pt]{{article}}
 
 _DEPTH_RE = re.compile(r"depth=(\d+)")
 
+#: Two-or-more consecutive newlines (a blank line), possibly with trailing
+#: horizontal whitespace on the blank line itself.
+_BLANK_LINE_RE = re.compile(r"\n[ \t]*\n+")
+
+#: A bare `\ce{...}`/`\pu{...}` (mhchem's chemical-formula/physical-unit
+#: macros) directly after a subscript/superscript marker, with no enclosing
+#: braces of its own - see `_brace_bare_mhchem_macros`.
+_BARE_MHCHEM_SUBSCRIPT_RE = re.compile(r"([_^])(\\(?:ce|pu))\{")
+
+
+def _collapse_blank_lines(latex: str) -> str:
+    """Collapse blank lines in math source into a single interword space.
+
+    Parameters
+    ----------
+    latex : str
+        Raw LaTeX math source, as extracted verbatim (including whitespace)
+        from a PrairieLearn question's HTML.
+
+    Returns
+    -------
+    str
+        `latex` with every run of 2+ consecutive newlines replaced by a
+        single space.
+
+    Notes
+    -----
+    Question authors sometimes hand-format a long equation across several
+    indented lines with a blank line for visual separation (e.g. before a
+    final "= result" line) - MathJax renders this without complaint, but a
+    literal blank line inside real LaTeX math mode is a paragraph break and
+    raises `! Missing $ inserted.`. A *single* newline is left untouched: TeX
+    already treats it as an ordinary interword space, so it's not the
+    problem case. This can turn a blank line inside a `\\text{...}` argument
+    into a single space too, but a blank line there would already be
+    unusual/meaningless content, not a case worth preserving exactly.
+    """
+    return _BLANK_LINE_RE.sub(" ", latex)
+
+
+def _brace_bare_mhchem_macros(latex: str) -> str:
+    r"""Wrap a bare `\ce{...}`/`\pu{...}` after `_`/`^` in an extra brace group.
+
+    Parameters
+    ----------
+    latex : str
+        Raw LaTeX math source, as extracted verbatim from a PrairieLearn
+        question's HTML.
+
+    Returns
+    -------
+    str
+        `latex` with every `_\ce{...}`/`^\pu{...}` (etc.) rewritten to
+        `_{\ce{...}}`/`^{\pu{...}}`, matching each macro's own closing brace
+        by depth-counting (so nested braces inside the argument, e.g.
+        `\ce{CO2^2+}`, aren't cut short).
+
+    Notes
+    -----
+    mhchem's `\ce`/`\pu` are defined via `xparse` and - unlike an ordinary
+    `\newcommand` macro - can't be grabbed as the single token TeX's `_`/`^`
+    take when not enclosed in braces; real LaTeX raises `! Missing {
+    inserted.` on e.g. `V_\ce{CO2}`, even though MathJax's mhchem extension
+    renders it fine. Confirmed by isolating a minimal reproduction: `$V_\ce
+    {CO2}$` fails to compile, `$V_{\ce{CO2}}$` compiles. Applies
+    unconditionally (not gated on `mhchem` being in `_extra_packages`): if
+    mhchem isn't loaded, `\ce`/`\pu` are undefined regardless of bracing, so
+    this rewrite is a no-op change of which (still correct) error occurs.
+    """
+    out = []
+    pos = 0
+    for m in _BARE_MHCHEM_SUBSCRIPT_RE.finditer(latex):
+        if m.start() < pos:
+            continue
+        out.append(latex[pos : m.start()])
+        script_char, macro = m.group(1), m.group(2)
+        brace_open = m.end() - 1
+        depth = 0
+        close = None
+        for i in range(brace_open, len(latex)):
+            if latex[i] == "{":
+                depth += 1
+            elif latex[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    close = i
+                    break
+        if close is None:
+            out.append(latex[m.start() : m.end()])
+            pos = m.end()
+            continue
+        out.append(f"{script_char}{{{macro}{latex[brace_open : close + 1]}}}")
+        pos = close + 1
+    out.append(latex[pos:])
+    return "".join(out)
+
 
 class LatexRenderError(Exception):
     """Raised when LaTeX math source could not be rendered to a PNG.
@@ -339,14 +435,15 @@ def render_math_png(
     # margin. dvipng's reported `depth=` figure does NOT track the added bottom kern
     # (stays fixed at the inner hbox's own natural depth) - `depth_pt` is adjusted
     # manually below instead of trusting that measurement for this piece.
+    normalized_latex = _brace_bare_mhchem_macros(_collapse_blank_lines(latex))
     if display_mode:
         content = (
             f"\\vbox{{\\kern {_DISPLAY_EXTRA_VPAD_PT}pt"
-            f"\\hbox{{$\\displaystyle {latex}$}}"
+            f"\\hbox{{$\\displaystyle {normalized_latex}$}}"
             f"\\kern {_DISPLAY_EXTRA_VPAD_PT}pt}}"
         )
     else:
-        content = f"${latex}$"
+        content = f"${normalized_latex}$"
     extra_packages = "\n".join(f"\\usepackage{{{pkg}}}" for pkg in _extra_packages)
     source = _SOURCE_TEMPLATE.format(
         size=font_size_pt, border=_PREVIEW_BORDER_PT, extra_packages=extra_packages, content=content
