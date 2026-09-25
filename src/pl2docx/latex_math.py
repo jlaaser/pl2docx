@@ -41,7 +41,9 @@ rather than assume these are always present.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+import signal
 import shutil
 import subprocess
 import tempfile
@@ -65,6 +67,9 @@ _DISPLAY_EXTRA_VPAD_PT = max(_DISPLAY_VERTICAL_MARGIN_PT - _PREVIEW_BORDER_PT, 0
 _LATEX_TIMEOUT_S = 20
 _DVIPNG_TIMEOUT_S = 20
 _KPSEWHICH_TIMEOUT_S = 10
+#: How long to wait, after killing a timed-out tool's process tree, for its
+#: output pipes to close before giving up on them - see `_run_tool`.
+_KILL_GRACE_S = 5
 
 #: `\boldmath` matches PrairieLearn's own MathJax rendering, which the user
 #: confirmed (2026-08-12 visual review) uses a visibly heavier weight than
@@ -98,10 +103,12 @@ _DEPTH_RE = re.compile(r"depth=(\d+)")
 #: horizontal whitespace on the blank line itself.
 _BLANK_LINE_RE = re.compile(r"\n[ \t]*\n+")
 
-#: A bare `\ce{...}`/`\pu{...}` (mhchem's chemical-formula/physical-unit
-#: macros) directly after a subscript/superscript marker, with no enclosing
-#: braces of its own - see `_brace_bare_mhchem_macros`.
-_BARE_MHCHEM_SUBSCRIPT_RE = re.compile(r"([_^])(\\(?:ce|pu))\{")
+#: Start of an mhchem `\ce{...}`/`\pu{...}` (chemical-formula/physical-unit
+#: macros) call - see `_brace_mhchem_macros`.
+_MHCHEM_MACRO_RE = re.compile(r"\\(?:ce|pu)\{")
+
+#: A `_`/`^` (after optional whitespace) at the start of the remaining text.
+_SCRIPT_MARKER_RE = re.compile(r"\s*[_^]")
 
 
 def _collapse_blank_lines(latex: str) -> str:
@@ -134,8 +141,8 @@ def _collapse_blank_lines(latex: str) -> str:
     return _BLANK_LINE_RE.sub(" ", latex)
 
 
-def _brace_bare_mhchem_macros(latex: str) -> str:
-    r"""Wrap a bare `\ce{...}`/`\pu{...}` after `_`/`^` in an extra brace group.
+def _brace_mhchem_macros(latex: str) -> str:
+    r"""Wrap `\ce{...}`/`\pu{...}` in braces where it's directly adjacent to `_`/`^`.
 
     Parameters
     ----------
@@ -146,30 +153,37 @@ def _brace_bare_mhchem_macros(latex: str) -> str:
     Returns
     -------
     str
-        `latex` with every `_\ce{...}`/`^\pu{...}` (etc.) rewritten to
-        `_{\ce{...}}`/`^{\pu{...}}`, matching each macro's own closing brace
-        by depth-counting (so nested braces inside the argument, e.g.
-        `\ce{CO2^2+}`, aren't cut short).
+        `latex` with each `\ce{...}`/`\pu{...}` call that is either the
+        argument of a `_`/`^` (`V_\ce{CO2}`) or itself takes a `_`/`^`
+        (`\ce{CaCl2}_{(aq)}`) wrapped in its own brace group
+        (`V_{\ce{CO2}}`, `{\ce{CaCl2}}_{(aq)}`). Each macro's own closing
+        brace is matched by depth-counting, so nested braces inside the
+        argument (e.g. `\ce{CO2^{2+}}`) aren't cut short.
 
     Notes
     -----
-    mhchem's `\ce`/`\pu` are defined via `xparse` and - unlike an ordinary
-    `\newcommand` macro - can't be grabbed as the single token TeX's `_`/`^`
-    take when not enclosed in braces; real LaTeX raises `! Missing {
-    inserted.` on e.g. `V_\ce{CO2}`, even though MathJax's mhchem extension
-    renders it fine. Confirmed by isolating a minimal reproduction: `$V_\ce
-    {CO2}$` fails to compile, `$V_{\ce{CO2}}$` compiles. Applies
-    unconditionally (not gated on `mhchem` being in `_extra_packages`): if
-    mhchem isn't loaded, `\ce`/`\pu` are undefined regardless of bracing, so
-    this rewrite is a no-op change of which (still correct) error occurs.
+    Two distinct real-LaTeX failures that MathJax's mhchem extension
+    tolerates, both confirmed by minimal reproduction:
+
+    - *Script argument*: mhchem's `\ce`/`\pu` are `xparse`-based and can't
+      be grabbed as the single token `_`/`^` take when not in braces
+      (`! Missing { inserted.` on `V_\ce{CO2}`).
+    - *Script on `\ce`*: `\ce{...}` already ends in a script slot in real
+      LaTeX, so a following `_`/`^` raises `! Double subscript.`
+      (`\ce{CaCl2}_{(aq)}`); a brace group makes it an ordinary nucleus.
+
+    A `\ce` that is both preceded and followed by a script marker is only
+    wrapped once (a genuine double subscript in TeX, not something this can
+    or should repair). Applies unconditionally (not gated on `mhchem` being
+    in `_extra_packages`): if mhchem isn't loaded, `\ce`/`\pu` are undefined
+    regardless of bracing, so this only changes which (still correct) error
+    occurs.
     """
     out = []
     pos = 0
-    for m in _BARE_MHCHEM_SUBSCRIPT_RE.finditer(latex):
+    for m in _MHCHEM_MACRO_RE.finditer(latex):
         if m.start() < pos:
             continue
-        out.append(latex[pos : m.start()])
-        script_char, macro = m.group(1), m.group(2)
         brace_open = m.end() - 1
         depth = 0
         close = None
@@ -182,10 +196,12 @@ def _brace_bare_mhchem_macros(latex: str) -> str:
                     close = i
                     break
         if close is None:
-            out.append(latex[m.start() : m.end()])
-            pos = m.end()
             continue
-        out.append(f"{script_char}{{{macro}{latex[brace_open : close + 1]}}}")
+        preceded = latex[pos : m.start()].rstrip().endswith(("_", "^"))
+        followed = _SCRIPT_MARKER_RE.match(latex, close + 1) is not None
+        out.append(latex[pos : m.start()])
+        call = latex[m.start() : close + 1]
+        out.append(f"{{{call}}}" if preceded or followed else call)
         pos = close + 1
     out.append(latex[pos:])
     return "".join(out)
@@ -268,14 +284,100 @@ def configure_extra_packages(packages: Iterable[str]) -> None:
     _cache.clear()
 
 
+def _kill_process_tree(proc: subprocess.Popen) -> None:
+    """Forcibly terminate `proc` and every process it spawned.
+
+    Parameters
+    ----------
+    proc : subprocess.Popen
+        A process started by `_run_tool` (on POSIX, as the leader of its own
+        session/process group - see there).
+
+    Notes
+    -----
+    Best-effort: never raises if the process (or its tree) has already
+    exited. Falls back to killing just `proc` itself if the tree kill fails.
+    """
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=_KILL_GRACE_S,
+            )
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
+def _run_tool(args: list[str], timeout_s: float) -> subprocess.CompletedProcess[str]:
+    """Run an external TeX tool to completion, enforcing `timeout_s` on its whole process tree.
+
+    Parameters
+    ----------
+    args : list[str]
+        Command line: executable path followed by its arguments.
+    timeout_s : float
+        Maximum wall-clock time to let the tool run, in seconds.
+
+    Returns
+    -------
+    subprocess.CompletedProcess[str]
+        The finished process's return code and captured stdout/stderr
+        (decoded as text; undecodable bytes replaced rather than raising).
+
+    Raises
+    ------
+    subprocess.TimeoutExpired
+        If the tool hasn't exited within `timeout_s`. Its whole process tree
+        has been killed by the time this propagates.
+
+    Notes
+    -----
+    Replaces a plain `subprocess.run(..., capture_output=True, timeout=...)`,
+    which does not reliably enforce its timeout on Windows: on timeout it
+    kills only the direct child, then waits - with no timeout - for the
+    output pipes to close. MiKTeX's `latex.exe`/`dvipng.exe` are launchers
+    that spawn the real engine as a grandchild holding those same pipes, so
+    a stuck engine (e.g. waiting on MiKTeX's install-missing-package prompt)
+    hung the whole pl2docx run indefinitely instead of failing after
+    `timeout_s`. Here the entire tree is killed (`taskkill /T` on Windows,
+    a process-group kill elsewhere), and stdin is `DEVNULL` so the tool can
+    never block waiting on console input.
+    """
+    popen_kwargs = {} if os.name == "nt" else {"start_new_session": True}
+    proc = subprocess.Popen(
+        args,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        errors="replace",
+        **popen_kwargs,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        _kill_process_tree(proc)
+        try:
+            proc.communicate(timeout=_KILL_GRACE_S)
+        except subprocess.TimeoutExpired:
+            # Something outside the tree still holds the pipes; abandon them
+            # rather than hang - the caller only needs the timeout reported.
+            pass
+        raise
+    return subprocess.CompletedProcess(args, proc.returncode, stdout, stderr)
+
+
 def _package_resolves(kpsewhich_bin: str, package: str) -> bool:
     try:
-        result = subprocess.run(
-            [kpsewhich_bin, f"{package}.sty"],
-            capture_output=True,
-            text=True,
-            timeout=_KPSEWHICH_TIMEOUT_S,
-        )
+        result = _run_tool([kpsewhich_bin, f"{package}.sty"], _KPSEWHICH_TIMEOUT_S)
     except subprocess.TimeoutExpired:
         return False
     return result.returncode == 0 and bool(result.stdout.strip())
@@ -435,7 +537,7 @@ def render_math_png(
     # margin. dvipng's reported `depth=` figure does NOT track the added bottom kern
     # (stays fixed at the inner hbox's own natural depth) - `depth_pt` is adjusted
     # manually below instead of trusting that measurement for this piece.
-    normalized_latex = _brace_bare_mhchem_macros(_collapse_blank_lines(latex))
+    normalized_latex = _brace_mhchem_macros(_collapse_blank_lines(latex))
     if display_mode:
         content = (
             f"\\vbox{{\\kern {_DISPLAY_EXTRA_VPAD_PT}pt"
@@ -455,7 +557,7 @@ def render_math_png(
     tex_path.write_text(source, encoding="utf-8")
 
     try:
-        compile_result = subprocess.run(
+        compile_result = _run_tool(
             [
                 latex_bin,
                 "-interaction=nonstopmode",
@@ -464,9 +566,7 @@ def render_math_png(
                 str(work_dir),
                 str(tex_path),
             ],
-            capture_output=True,
-            text=True,
-            timeout=_LATEX_TIMEOUT_S,
+            _LATEX_TIMEOUT_S,
         )
     except subprocess.TimeoutExpired as exc:
         raise LatexRenderError(f"latex timed out rendering {latex!r}") from exc
@@ -477,7 +577,7 @@ def render_math_png(
 
     png_path = work_dir / f"{job_name}.png"
     try:
-        rasterize_result = subprocess.run(
+        rasterize_result = _run_tool(
             [
                 dvipng_bin,
                 "-D",
@@ -491,9 +591,7 @@ def render_math_png(
                 str(png_path),
                 str(dvi_path),
             ],
-            capture_output=True,
-            text=True,
-            timeout=_DVIPNG_TIMEOUT_S,
+            _DVIPNG_TIMEOUT_S,
         )
     except subprocess.TimeoutExpired as exc:
         raise LatexRenderError(f"dvipng timed out rasterizing {latex!r}") from exc

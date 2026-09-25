@@ -94,6 +94,28 @@ def test_renders_mhchem_chemistry_formula_once_configured():
     assert width > 0 and height > 0
 
 
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        (r"V_\ce{CO2}", r"V_{\ce{CO2}}"),
+        (r"\ce{CaCl2}_\ce{(aq)}", r"{\ce{CaCl2}}_{\ce{(aq)}}"),
+        (r"\ce{CaCl2}_{(aq)} + \ce{X} ^{2}", r"{\ce{CaCl2}}_{(aq)} + {\ce{X}} ^{2}"),
+        (r"\ce{Ca^{2+}}_x", r"{\ce{Ca^{2+}}}_x"),
+        (r"2\,\ce{AgCl} + \ce{ -> }", r"2\,\ce{AgCl} + \ce{ -> }"),
+    ],
+)
+def test_brace_mhchem_macros(source, expected):
+    assert latex_math_module._brace_mhchem_macros(source) == expected
+
+
+def test_renders_mhchem_with_state_subscript():
+    r"""MathJax accepts `\ce{X}_\ce{(aq)}`; real LaTeX raises `Double subscript`
+    unless the `\ce` call is braced first."""
+    configure_extra_packages(["mhchem"])
+    rendered = render_math_png(r"\ce{CaCl2}_\ce{(aq)} + 2\,\ce{AgNO3}_{\ce{(aq)}}", display_mode=False)
+    assert rendered.png_path.is_file()
+
+
 def test_configure_extra_packages_raises_for_missing_package():
     with pytest.raises(LatexPackageNotFoundError):
         configure_extra_packages(["this-package-definitely-does-not-exist"])
