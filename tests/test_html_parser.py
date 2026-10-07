@@ -997,6 +997,63 @@ def test_math_delimiter_variants():
     assert "$5" in plain_text(nodes)
 
 
+
+def test_display_math_spanning_html_comment_is_one_equation():
+    """An HTML comment inside `$$...$$` (real course content: a plain-text
+    note after a chemical equation) must not split the equation - MathJax
+    treats comments as empty text when finding delimiters. Previously each
+    lone `$$` became an empty inline equation and the body leaked through as
+    raw LaTeX text."""
+    html = r"""
+    <div class="question-block">
+      <div class="card-header"><h1>Comment in math</h1></div>
+      <div class="card-body question-body">
+        <ol>
+          <li>
+            Combustion of coke (${\ce{C}}_{ \ce{(s)} }$):
+            $$
+                2\,{\ce{C}}_{ \ce{(s)} } \ce{ -&gt; } 2\,{\ce{CO}}_{ \ce{(g)} } <!--C(s) + O&#8322;(g) &#8594; CO(g)-->
+            $$
+          </li>
+        </ol>
+        <span class="input-group pl-integer-input">
+          <input class="form-control pl-integer-input-input" name="answer" type="text">
+        </span>
+      </div>
+    </div>
+    """
+    q = parse_instance_question_html(html)
+    nodes = q.prompt_segments[0]
+    math_nodes = [n for n in nodes if isinstance(n, MathRef)]
+    assert [(n.latex.strip(), n.display_mode) for n in math_nodes] == [
+        (r"{\ce{C}}_{ \ce{(s)} }", False),
+        (r"2\,{\ce{C}}_{ \ce{(s)} } \ce{ -> } 2\,{\ce{CO}}_{ \ce{(g)} }", True),
+    ]
+    # No LaTeX source or stray delimiters leak through as ordinary text, and
+    # the comment's own text is dropped.
+    text = "".join(n.text for n in nodes if hasattr(n, "text") and not isinstance(n, MathRef))
+    assert r"\ce" not in text and "$" not in text
+    assert "O\u2082" not in text
+
+
+def test_unmatched_double_dollar_is_literal_text_not_empty_math():
+    html = """
+    <div class="question-block">
+      <div class="card-header"><h1>Stray $$</h1></div>
+      <div class="card-body question-body">
+        <p>Costs $$ and $x^2$ here.</p>
+        <span class="input-group pl-integer-input">
+          <input class="form-control pl-integer-input-input" name="answer" type="text">
+        </span>
+      </div>
+    </div>
+    """
+    q = parse_instance_question_html(html)
+    nodes = q.prompt_segments[0]
+    assert [(n.latex, n.display_mode) for n in nodes if isinstance(n, MathRef)] == [("x^2", False)]
+    assert "Costs $$ and" in plain_text(nodes)
+
+
 def test_math_inside_bold_does_not_carry_bold_flag():
     html = """
     <div class="question-block">

@@ -920,9 +920,14 @@ def _parse_width_px(width_attr: str | None) -> int | None:
 #: single-`$` alternative so it is never mistaken for two adjacent empty
 #: `$...$` spans - `re` tries alternatives left-to-right at a given start
 #: position and uses the first that matches, not the longest overall match.
+#: A `$$` with no closing `$$` matches the bare `\$\$` alternative (passed
+#: through as literal text) rather than falling through to the single-`$`
+#: alternative, which would otherwise read it as an empty `$...$` span -
+#: MathJax likewise never treats `$$` as empty inline math.
 _MATH_SPLIT_RE = re.compile(
     r"\\\$"
     r"|\$\$(?P<disp_dd>.*?)\$\$"
+    r"|\$\$"
     r"|\\\[(?P<disp_br>.*?)\\\]"
     r"|\\\((?P<inl_br>.*?)\\\)"
     r"|\$(?P<inl_d>[^$]*?)\$",
@@ -1054,6 +1059,8 @@ def _split_math_delimiters(
             nodes.append(TextRun(text[pos : m.start()], bold, italic, underline, color))
         if m.group(0) == "\\$":
             nodes.append(TextRun("$", bold, italic, underline, color))
+        elif m.group(0) == "$$":
+            nodes.append(TextRun("$$", bold, italic, underline, color))
         elif m.group("disp_dd") is not None:
             nodes.append(MathRef(text[m.start("disp_dd") : m.end("disp_dd")], display_mode=True))
         elif m.group("disp_br") is not None:
@@ -1094,6 +1101,51 @@ def _walk_content(
     nodes: list[ContentNode | _WidgetMarker] = []
     _walk_into(root, nodes, marker_by_id or {}, bold=False, italic=False, underline=False, color=None)
     return nodes
+
+
+def _text_merged_children(node: Tag) -> list:
+    """List `node`'s children with text separated only by HTML comments merged into one string.
+
+    Parameters
+    ----------
+    node : Tag
+        The element whose direct children to list.
+
+    Returns
+    -------
+    list
+        `node`'s children in source order, except that each maximal run of
+        adjacent plain-text nodes and `Comment`s is replaced by a single
+        `NavigableString` holding the run's text with the comments dropped.
+        Tags (and non-text `NavigableString` subclasses such as CDATA) are
+        passed through unchanged; a run consisting only of comments
+        disappears entirely.
+
+    Notes
+    -----
+    Mirrors MathJax's own text scanning (`HTMLDomStrings`, whose default
+    `includeHtmlTags` maps `#comment` to `''`): a comment does not end the
+    string MathJax searches for math delimiters, so course content can - and
+    does - put an HTML comment inside a `$$...$$` equation. Without merging,
+    the comment splits the equation into two text nodes, neither containing
+    a matched delimiter pair. Does not modify `node`'s own tree.
+    """
+    merged: list = []
+    pending: list[str] | None = None
+    for child in node.children:
+        if isinstance(child, Comment) or type(child) is NavigableString:
+            if pending is None:
+                pending = []
+            if not isinstance(child, Comment):
+                pending.append(str(child))
+            continue
+        if pending:
+            merged.append(NavigableString("".join(pending)))
+        pending = None
+        merged.append(child)
+    if pending:
+        merged.append(NavigableString("".join(pending)))
+    return merged
 
 
 def _walk_into(
@@ -1167,7 +1219,7 @@ def _walk_into(
         # of a flat bullet for every list, and for <ol> vs <ul> at all.
         list_id = id(node)
         index = 0
-        for child in node.children:
+        for child in _text_merged_children(node):
             if isinstance(child, Tag) and child.name == "li":
                 index += 1
                 _walk_li(
@@ -1191,7 +1243,7 @@ def _walk_into(
     if is_block and out:
         out.append(ParagraphBreak(hard=True))
 
-    for child in node.children:
+    for child in _text_merged_children(node):
         _walk_into(child, out, marker_by_id, child_bold, child_italic, child_underline, child_color)
 
     if is_block:
@@ -1210,7 +1262,7 @@ def _walk_li(
     if out:
         out.append(ParagraphBreak())
     out.append(ListItemStart(ordered=ordered, index=index, list_id=list_id))
-    for child in node.children:
+    for child in _text_merged_children(node):
         _walk_into(child, out, marker_by_id, bold, italic, underline, color)
     out.append(ListItemEnd())
 
