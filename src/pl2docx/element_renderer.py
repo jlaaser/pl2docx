@@ -294,6 +294,40 @@ _LIST_MARKERS = {
     "checkbox": lambda _idx: "▢",  # ▢ WHITE SQUARE WITH ROUNDED CORNERS
 }
 
+#: Filled-in counterparts of `_LIST_MARKERS`, used for a correct option in the
+#: answer key (alongside bolding) so the key reads like a filled-in bubble
+#: sheet. Each is the same-sized filled sibling of its hollow glyph, so the
+#: option text stays aligned. `letter-labels` has no filled form - bolding
+#: alone marks it.
+_FILLED_LIST_MARKERS = {
+    "bubble": "⬤",  # ⬤ BLACK LARGE CIRCLE (filled sibling of ◯)
+    "checkbox": "▣",  # ▣ WHITE SQUARE CONTAINING BLACK SMALL SQUARE
+}
+
+
+def _list_marker(list_style: str, idx: int, is_marked_correct: bool) -> str:
+    """Return the marker text shown before one selector option.
+
+    Parameters
+    ----------
+    list_style : {"letter-labels", "bubble", "checkbox"}
+        The widget's resolved marker style.
+    idx : int
+        The option's 0-based position within the widget.
+    is_marked_correct : bool
+        Whether this option is being marked as correct (answer key, with
+        `bold_correct` enabled).
+
+    Returns
+    -------
+    str
+        The filled glyph for a marked-correct `bubble`/`checkbox` option,
+        otherwise the style's normal (hollow / letter) marker.
+    """
+    if is_marked_correct and list_style in _FILLED_LIST_MARKERS:
+        return _FILLED_LIST_MARKERS[list_style]
+    return _LIST_MARKERS[list_style](idx)
+
 #: Marker glyph size, as a multiple of the paragraph's own effective font
 #: size - `letter-labels` is plain text and deliberately excluded (not in
 #: this dict), left at normal size. `bubble` (◯, U+25EF) is also excluded:
@@ -975,12 +1009,13 @@ def _render_selector_inline(
             _append_run_text(paragraph, "   ")
             runs.extend(paragraph.runs[spacer_start:])
         option_start = len(paragraph.runs)
-        marker = _LIST_MARKERS[prefs.list_style](idx)
+        is_marked_correct = prefs.bold_correct and idx in widget.correct_option_indices
+        marker = _list_marker(prefs.list_style, idx, is_marked_correct)
         marker_run = _append_run_text(paragraph, f"{marker} ")
         _apply_marker_font_size(marker_run, paragraph, prefs.list_style)
         _render_nodes_to_paragraph(paragraph, option_nodes, image_base_dir)
         combined = list(paragraph.runs[option_start:])
-        if prefs.bold_correct and idx in widget.correct_option_indices:
+        if is_marked_correct:
             for run in combined:
                 run.bold = True
         runs.extend(combined)
@@ -1029,12 +1064,13 @@ def _render_selector_block(
             paragraph = sink.add_paragraph()
             _apply_block_indent(paragraph, block_indent_inches)
         marker_start = len(paragraph.runs)
-        marker = _LIST_MARKERS[prefs.list_style](idx)
+        is_marked_correct = prefs.bold_correct and idx in widget.correct_option_indices
+        marker = _list_marker(prefs.list_style, idx, is_marked_correct)
         marker_run = _append_run_text(paragraph, f"{marker} ")
         _apply_marker_font_size(marker_run, paragraph, prefs.list_style)
         _render_nodes_to_paragraph(paragraph, option_nodes, image_base_dir)
         combined = list(paragraph.runs[marker_start:])
-        if prefs.bold_correct and idx in widget.correct_option_indices:
+        if is_marked_correct:
             for run in combined:
                 run.bold = True
         runs.extend(combined)

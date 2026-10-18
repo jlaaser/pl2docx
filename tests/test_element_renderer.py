@@ -123,7 +123,47 @@ def test_selector_block_display_one_option_per_line(starter_template):
     ctx = build_question_context(tpl, _mc_question(), 1, element_config)
     paragraphs = [p.text for p in ctx["question_contents"].paragraphs]
     assert any(p.strip() == "◯ Alpha" for p in paragraphs)
-    assert any(p.strip() == "◯ Beta" for p in paragraphs)
+    # Beta is the correct option: its bubble is filled in for the key.
+    assert any(p.strip() == "⬤ Beta" for p in paragraphs)
+
+
+@pytest.mark.parametrize(
+    ("list_style", "display", "hollow", "filled"),
+    [
+        ("bubble", "block", "◯", "⬤"),
+        ("bubble", "inline", "◯", "⬤"),
+        ("checkbox", "block", "▢", "▣"),
+    ],
+)
+def test_selector_key_fills_correct_marker(starter_template, list_style, display, hollow, filled):
+    """In the answer key, a correct option's bubble/checkbox marker is swapped
+    for its filled-in counterpart (and bolded); incorrect options keep the
+    hollow marker. With `bold_correct` off, no option is marked at all."""
+    tpl = _tpl(starter_template)
+    element_config = ElementConfig(
+        preferences={"multiple_choice": SelectorPreferences(list_style=list_style, display=display)},
+        behavior_class={},
+    )
+    text = _text(build_question_context(tpl, _mc_question(), 1, element_config)["question_contents"])
+    assert f"{hollow} Alpha" in text
+    assert f"{filled} Beta" in text
+    marker_run = next(
+        r
+        for p in build_question_context(tpl, _mc_question(), 1, element_config)["question_contents"].paragraphs
+        for r in p.runs
+        if r.text.startswith(filled)
+    )
+    assert marker_run.bold is True
+
+    element_config = ElementConfig(
+        preferences={
+            "multiple_choice": SelectorPreferences(list_style=list_style, display=display, bold_correct=False)
+        },
+        behavior_class={},
+    )
+    text = _text(build_question_context(tpl, _mc_question(), 1, element_config)["question_contents"])
+    assert f"{hollow} Beta" in text
+    assert filled not in text
 
 
 def test_checkbox_marker_rendered_larger_than_bubble_and_letter_labels(starter_template):

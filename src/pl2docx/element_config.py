@@ -72,8 +72,10 @@ class SelectorPreferences:
         for `pl-checkbox` (or any `additional-elements` entry extending `selector`,
         which falls back to `"bubble"`).
     bold_correct : bool
-        Whether to bold the correct option's run in the answer-key render, when it
-        could be matched back to `ParsedQuestion.Widget.correct_option_indices`.
+        Whether to mark the correct option in the answer-key render, when it could
+        be matched back to `ParsedQuestion.Widget.correct_option_indices`: its run
+        is bolded, and a `bubble`/`checkbox` marker is swapped for its filled-in
+        counterpart (⬤ / ▣).
     display : {"inline", "block", "template", "none"} or None
         Where/how this widget's rendered content is placed. `None` means "try to
         auto-detect from the source HTML" (the `form-check-inline` signal); if no
