@@ -72,7 +72,7 @@ To generate a printable assignment using pl2docx, do the following:
 
 1. Set up a PrairieLearn assessment defining the assignment for which you wish to generate printable copies. Set this assessment up exactly as you would if you were going to administer it via PrairieLearn - zones, questions, question alternatives, point values, the works.
 2. If the assessment was set up on the remote PrairieLearn servers, make sure to pull the up-to-date copy of your course repo to your local machine before proceeding.
-3. Start your local PrairieLearn server, pointed to the local copy of your course repo.
+3. Start your local PrairieLearn server, pointed to the local copy of your course repo, and (re)load the course from disk if needed.
 4. Create a folder for this assessment's pl2docx files (anywhere on your machine - it doesn't need to be inside this repo). In that folder:
    - Copy `config.example.yaml` from this repo to `config.yaml` and fill in your server address, course/course-instance/assessment identifiers, and any other desired settings - see [notes/configuration.md](notes/configuration.md) for the full field reference.
    - Generate a starting template with `pl2docx-starter-template`, then open `template.docx` in Word and customize it (see "Assessment templating" below).
